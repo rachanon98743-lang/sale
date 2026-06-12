@@ -119793,18 +119793,18 @@ return A.fk(A.en(s,A.d5(A.b([A.dc(c,40,40),B.cE,A.bF(a,s,s,s,s,s,s,s),B.bu,A.bF(
 a3s(a,b,c,d){var s=null,r=A.ey(20),q=A.b([A.bF(a,s,s,s,B.b31,s,s,s),B.cE],t.D)
 B.m.P(q,new A.a7(b,new A.aFv(c,d),A.Z(b).i("a7<1,i>")))
 return A.fk(A.en(s,A.d5(q,B.bj,B.a6,B.aa),B.a7,s,s,new A.cX(B.N,s,s,r,s,s,B.b2),s,s,B.pd,B.aK,s,s,s),1)},
-N(a){var s,r,q,p,o,n,m,l,k,j,i,h,g,f=this,e=null,d="assets/pic/money.png"
+N(a){var s,r,q,p,o,n,m,l,k,j,i,h,g,f=this,e=null
 if(f.d)s=B.ia
 else{s=t.D
-r=A.dq(A.b([f.Fn("\u0e22\u0e2d\u0e14\u0e02\u0e32\u0e22\u0e23\u0e27\u0e21",B.n.a8(f.f,0)+" \u0e1a\u0e32\u0e17",A.ja(d,40,40)),f.Fn("\u0e22\u0e2d\u0e14\u0e17\u0e35\u0e48\u0e0a\u0e33\u0e23\u0e30\u0e41\u0e25\u0e49\u0e27",B.n.a8(f.f-f.e,0)+" \u0e1a\u0e32\u0e17",A.ja("assets/pic/getmoney.png",40,40))],s),B.ad,B.a6,B.aa,0)
+r=A.dq(A.b([f.Fn("\u0e22\u0e2d\u0e14\u0e02\u0e32\u0e22\u0e23\u0e27\u0e21",B.n.a8(f.f,0)+" \u0e1a\u0e32\u0e17",A.ja("assets/pic/money.png",40,40)),f.Fn("\u0e22\u0e2d\u0e14\u0e17\u0e35\u0e48\u0e0a\u0e33\u0e23\u0e30\u0e41\u0e25\u0e49\u0e27",B.n.a8(f.f-f.e,0)+" \u0e1a\u0e32\u0e17",A.ja("assets/pic/getmoney.png",40,40))],s),B.ad,B.a6,B.aa,0)
 q=A.dq(A.b([f.Fn("\u0e22\u0e2d\u0e14\u0e04\u0e49\u0e32\u0e07\u0e0a\u0e33\u0e23\u0e30",B.n.a8(f.e,0)+" \u0e1a\u0e32\u0e17",A.ja("assets/pic/notmoney.png",40,40)),f.Fn("\u0e08\u0e31\u0e07\u0e2b\u0e27\u0e31\u0e14\u0e02\u0e32\u0e22\u0e14\u0e35\u0e17\u0e35\u0e48\u0e2a\u0e38\u0e14",f.w,A.ja("assets/pic/location.png",40,40))],s),B.ad,B.a6,B.aa,0)
 p=A.dq(A.b([f.a3s("\u0e08\u0e33\u0e19\u0e27\u0e19\u0e1a\u0e34\u0e25\u0e41\u0e15\u0e48\u0e25\u0e30\u0e08\u0e31\u0e07\u0e2b\u0e27\u0e31\u0e14",f.y,"province","total"),f.a3s("\u0e22\u0e2d\u0e14\u0e02\u0e32\u0e22\u0e25\u0e39\u0e01\u0e04\u0e49\u0e32",f.z,"customer_name","total")],s),B.bj,B.a6,B.aa,0)
 o=A.ey(20)
 n=A.dk(2024,1,1,0,0,0,0,0)
 m=A.dk(2030,12,31,0,0,0,0,0)
 l=f.at
-k=A.ja(d,40,40)
-j=A.ja(d,40,40)
+k=A.ja("assets/pic/left.png",40,40)
+j=A.ja("assets/pic/right.png",40,40)
 i=A.ey(12)
 h=A.ey(12)
 l=A.dk(A.aw(l),A.aq(l),A.bM(l),0,0,0,0,0)
