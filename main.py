@@ -199,19 +199,23 @@ class Company:
         self.last_scan = time.time()
         day0 = self.day_start_equity(eq)
         if not self.riskd.can_trade(eq, day0):
+            self.log("CEO", "สั่งงานรอบนี้: งดเปิดไม้ใหม่ (หยุดไว้/ขาดทุนถึงเพดาน) เฝ้าไม้ที่ถือ %d ไม้ต่อ" % len(self.acct.open_positions()))
             return
         self.regime = self.research.market_regime()
         if self.regime == "bear" and self.cfg.get("skip_bear_market", True) and self.risk != "high":
-            self.log("CEO", "ตลาดขาลง: งดเปิดไม้ใหม่รอบนี้ (ตั้ง skip_bear_market=false เพื่อปิด)")
+            self.log("CEO", "สั่งงานรอบนี้: ตลาดขาลง งดเปิดไม้ใหม่ (ตั้ง skip_bear_market=false เพื่อปิด)")
             return
         held = {p["symbol"] for p in self.acct.open_positions()}
         self.last_research = self.research.scan(self.risk)
         props = self.strategy.proposals(self.last_research, self.risk, held, self.regime)
+        n_prop = len(props)
         if props and self.riskd.slots_left(self.risk, self.regime, len(held)) > 0:
             props = self.ai.review(props, self.regime, self.acct.track_record())
         # ถือเต็มแล้ว: ไม่ต้องเสียค่า AI ตรวจ ให้ฝ่ายบริหารความเสี่ยงแจ้งเหตุผลเลย
         orders = self.riskd.approve(props, self.risk, self.regime, self.acct.open_positions(),
                                     self.ex.usdt_free(), eq, self.ex.filters)
+        n_ok = len(props)
+        bought = []
         max_spread = float(self.cfg.get("max_spread_pct", 0.5)) / 100
         max_slip = float(self.cfg.get("max_slippage_pct", 0.5)) / 100
         for o in orders:
@@ -224,9 +228,14 @@ class Company:
             self.log("ฝ่ายบริหารความเสี่ยง", "สภาพคล่อง %s ผ่าน (%s)" % (o["symbol"], why))
             try:
                 self.exe.buy(o, self.risk)
+                bought.append(o["symbol"])
             except Exception as e:
                 self.log("ฝ่ายเทรด", "ซื้อ %s ไม่สำเร็จ: %s" % (o["symbol"], e))
                 self.acct.add_decision("ฝ่ายเทรด", o["symbol"], False, "ส่งคำสั่งซื้อไม่สำเร็จ: %s" % e)
+        # CEO สรุปงานทุกรอบ: เห็นว่าบอททำงานอยู่ แม้ไม่มีใครเปิดแดชบอร์ด
+        self.log("CEO", "สั่งงานรอบนี้: วิจัย %d เหรียญ → กลยุทธ์เสนอ %d → ผ่าน AI %d → ซื้อ %d%s · ถือ %d/%d ไม้ · ตลาด %s" % (
+            len(self.last_research), n_prop, n_ok, len(bought), (" (%s)" % ", ".join(bought)) if bought else "",
+            len(self.acct.open_positions()), RISK_PROFILES[self.risk]["max_pos"], self.regime))
         self.save_paper()
         self.daily_report()
 
