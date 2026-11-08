@@ -27,7 +27,7 @@ RISK_PROFILES = {
     "high": {"name": "สูง",  "tf": "15m", "min_vol_m": 3,   "max_coins": 80, "size": 0.20, "sl": 0.08, "tp": 0.20, "max_pos": 5, "min_score": 65, "every_min": 5},
 }
 # Binance TH: วอลุ่มซื้อขายขั้นต่ำต่อวัน (ล้านบาท) เหรียญที่ต่ำกว่านี้ไม่สแกนเลย (แก้ได้ด้วย th_min_vol_m ใน config.json)
-TH_MIN_VOL_M = {"low": 10, "mid": 3, "high": 1}
+TH_MIN_VOL_M = {"low": 3, "mid": 1, "high": 0.5}  # Binance TH มีคู่บาทแค่ ~11 คู่ ตั้งต่ำไว้ ให้ตัวตรวจสภาพคล่องก่อนซื้อคุมแทน
 
 
 def liquidity_check(ex, symbol, amount, max_spread=0.005, max_slip=0.005, ticker=None):
@@ -210,6 +210,11 @@ class ResearchDept:
             cands.append((vol_m, s, float(t["priceChangePercent"])))
         cands.sort(reverse=True)
         cands = cands[:max_coins]
+        if th:  # Binance TH มีเหรียญน้อย: แสดงวอลุ่มทุกเหรียญ ไว้ปรับเกณฑ์
+            vols = sorted(((float(t["quoteVolume"]) / 1e6, t["symbol"]) for t in tick if t["symbol"] in self.ex.filters),
+                          reverse=True)
+            self.log(self.name, "วอลุ่ม 24 ชม. (ล้านบาท): " + ", ".join(
+                "%s %.2f" % (sym.replace(self.ex.quote, ""), v) for v, sym in vols))
         if low_vol or wide:
             self.log(self.name, "ตัดทิ้ง: วอลุ่มต่ำกว่า %g ล้าน%s %d เหรียญ, spread กว้างเกิน %.2f%% %d เหรียญ" % (
                 min_vol, "บาท" if th else "$", low_vol, max_spread * 100, wide))
