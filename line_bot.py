@@ -441,25 +441,31 @@ def doctor_loop(bot):
 
 
 def status_bar_loop(bot, every_min):
-    """อัปเดตข้อความบนแถบริชเมนู (ใต้แชท) เป็นสถานะบอท เช่น '🟢15:40 +1.2%' (ไม่กินโควตาข้อความ)
+    """อัปเดตข้อความบนแถบริชเมนู (ใต้แชท) เป็นสถานะบอท เช่น '🟢17:40 +1.2%' / '🔴17:40 -1.7%' (ไม่กินโควตาข้อความ)
+    LINE ให้ใส่แค่ตัวหนังสือ เปลี่ยนสีตัวอักษรไม่ได้ จึงใช้วงกลมเขียว/แดงบอกกำไร/ขาดทุนวันนี้
     ถ้าเวลาบนแถบเก่ากว่ารอบอัปเดตมาก แปลว่าบอทหยุดทำงาน"""
     import richmenu
     time.sleep(60)
+    last_bar, wait = None, every_min * 60
     while True:
         try:
             co = bot.co
             eq = co.equity_cached()
             day0 = co.acct.get("day_start_" + now_th().date().isoformat()) or eq
             chg = (eq / day0 - 1) * 100 if day0 else 0
-            icon = "⏸" if os.path.exists("STOP") else "🟢"
+            icon = "⏸" if os.path.exists("STOP") else ("🔴" if chg < -0.05 else "🟢")
             bar = "%s%s %+.1f%%" % (icon, now_th().strftime("%H:%M"), chg)
-            richmenu.set_bar(bot.token, bar)
-            if not getattr(bot, "bar_ok", False):
-                bot.bar_ok = True
-                bot.co.log("CEO", "อัปเดตแถบใต้แชท LINE เป็น '%s' แล้ว (ปิดแชทแล้วเปิดใหม่ถึงจะเห็น)" % bar)
-        except BaseException as e:  # richmenu ใช้ sys.exit เวลา error: ห้ามให้ thread ตาย
+            if bar != last_bar:
+                richmenu.set_bar(bot.token, bar)
+                last_bar, wait = bar, every_min * 60
+                if not getattr(bot, "bar_ok", False):
+                    bot.bar_ok = True
+                    bot.co.log("CEO", "อัปเดตแถบใต้แชท LINE เป็น '%s' แล้ว (ปิดแชทแล้วเปิดใหม่ถึงจะเห็น)" % bar)
+        except BaseException as e:  # richmenu error ห้ามให้ thread ตาย
+            if "429" in str(e):  # LINE บอกว่าถี่เกิน: ชะลอลงเอง
+                wait = min(wait * 2, 3600)
             bot.co.log("CEO", "อัปเดตแถบสถานะริชเมนูไม่ได้: %s" % e)
-        time.sleep(every_min * 60)
+        time.sleep(wait)
 
 
 def serve(company, port=8090):
@@ -521,7 +527,7 @@ def serve(company, port=8090):
     srv = ThreadingHTTPServer(("127.0.0.1", port), H)
     company.keep_thread("รับคำสั่ง LINE", srv.serve_forever)
     threading.Thread(target=doctor_loop, args=(bot,), daemon=True).start()
-    every = int(company.cfg.get("line_status_bar_min", 15))
+    every = max(1, int(company.cfg.get("line_status_bar_min", 5))) if company.cfg.get("line_status_bar_min", 5) else 0
     if every > 0:
         threading.Thread(target=status_bar_loop, args=(bot, every), daemon=True).start()
     return bot
