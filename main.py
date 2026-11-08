@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-main.py — CEO ของบริษัท AI เทรดคริปโต: สั่งงานทุกแผนกเป็นรอบๆ + เปิดหน้าแดชบอร์ด
+main.py — CEO ของบริษัท AI เทรดหุ้นสหรัฐฯ ผ่าน Webull: สั่งงานทุกแผนกตามเวลาตลาด + เปิดหน้าแดชบอร์ด
 
 รัน:
-    python main.py                 # ใช้ค่าใน config.json (เริ่มต้น = paper เงินจำลอง)
-    python main.py --mode testnet  # เทรดจริงบน Binance Testnet (เงินปลอม)
+    python main.py                 # ใช้ค่าใน config.json (เริ่มต้น = paper เงินจำลอง ใช้ราคาจริงจาก Webull)
+    python main.py --check         # ตรวจการเชื่อมต่อ Webull และยอดเงิน (ไม่ซื้อขาย)
+    python main.py --check-order   # ให้ Webull ตรวจคำสั่งซื้อทดลอง (preview ไม่ซื้อจริง)
     python main.py --mode live     # เงินจริง (ต้องยืนยันก่อน)
-แดชบอร์ด: เปิด http://localhost:8080 ในเบราว์เซอร์
+แดชบอร์ด: เปิด http://localhost:8081 ในเบราว์เซอร์ (8080 เป็นของบอทคริปโต)
 หยุดฉุกเฉิน: สร้างไฟล์ชื่อ STOP ในโฟลเดอร์นี้ (หยุดเปิดไม้ใหม่) หรือกด Ctrl+C
 """
 
@@ -20,7 +21,7 @@ import threading
 import time
 import traceback
 
-from binance_client import Binance, BinanceError
+from webull_client import Webull, WebullError as BinanceError, market_clock, ny_now
 from departments import (RISK_PROFILES, AccountingDept, AIAnalystDept, ExecutionDept, ResearchDept,
                          RiskDept, StrategyDept, liquidity_check, now_th, th_hm)
 import dashboard
@@ -42,21 +43,15 @@ class Company:
         self.risk = cfg.get("risk", "mid")
         if self.risk not in RISK_PROFILES:
             sys.exit("risk ต้องเป็น low / mid / high")
-        self.exchange = cfg.get("exchange", "binance")
-        tag = self.mode if self.exchange == "binance" else "%s_%s" % (self.exchange, self.mode)
-        if self.exchange == "binance_th" and (cfg.get("quote") or "THB") != "THB":
-            tag += "_" + cfg["quote"].lower()  # แยกบัญชีคู่ USDT ออกจากคู่บาท
-        self.acct = AccountingDept(os.path.join(HERE, "company_%s.db" % tag))
-        th = self.exchange == "binance_th" and (cfg.get("quote") or "THB") == "THB"  # เงินจำลองหน่วยบาท
-        self.ex = Binance(self.mode, os.environ.get("BINANCE_API_KEY", ""), os.environ.get("BINANCE_API_SECRET", ""),
-                          fee=cfg.get("fee", 0.001), exchange=self.exchange, quote=cfg.get("quote"),
-                          paper_balance=cfg.get("paper_balance_th", 30000) if th else cfg.get("paper_balance", 1000))
+        self.exchange = "webull"
+        self.acct = AccountingDept(os.path.join(HERE, "company_webull_%s.db" % self.mode))
+        self.ex = make_client(cfg)
         if self.mode == "paper":
             saved = self.acct.get("paper_wallet")
             if saved and self.ex.quote in saved:
                 self.ex.paper = saved
         self.research = ResearchDept(self.ex, self.log, cfg)
-        self.strategy = StrategyDept(self.log, self.acct, cfg)
+        self.strategy = StrategyDept(self.log, self.acct, cfg, self.research)
         self.ai = AIAnalystDept(cfg, self.acct, self.log)
         self.riskd = RiskDept(cfg, self.acct, self.log)
         self.exe = ExecutionDept(self.ex, self.acct, self.log, cfg)
@@ -64,17 +59,18 @@ class Company:
         self.last_scan = 0
         self.last_research = []
         self.status = "starting"
-        self.line = LineNotifier(cfg)
+        self.line = LineNotifier(cfg, prefix="📈 บอทหุ้น Webull")
         self.last_ok = time.time()
         self.sell_queue = []  # คำสั่งขายจาก LINE รอทำในลูปหลัก
         self.started_at = time.time()
-        self.last_eq = None       # มูลค่าพอร์ตล่าสุด (แดชบอร์ด/LINE อ่านค่านี้ ไม่ต้องยิงถาม Binance ทุกครั้ง)
+        self.last_eq = None       # มูลค่าพอร์ตล่าสุด (แดชบอร์ด/LINE อ่านค่านี้ ไม่ต้องยิงถาม Webull ทุกครั้ง)
         self.last_eq_t = 0
         self.px_cache = {}        # symbol -> (เวลา, ราคา)
         self.threads = {}         # ชื่อ -> (thread, ฟังก์ชันเปิดใหม่)
         self.last_hc = 0
         self.last_acct_log = 0
         self.downtime_note = None
+        self.clock = {"open": False}
 
     def log(self, dept, msg, line=False, key=None, every=0, urgent=False):
         """line=True = ส่งข้อความนี้เข้า LINE ด้วย"""
@@ -85,10 +81,10 @@ class Company:
             self.line.send("%s: %s" % (dept, msg), key=key, every_sec=every, urgent=urgent)
 
     def mode_label(self):
-        return {"paper": "เงินจำลอง", "testnet": "testnet", "live": "เงินจริง"}.get(self.mode, self.mode)
+        return {"paper": "เงินจำลอง", "live": "เงินจริง"}.get(self.mode, self.mode)
 
     def prices(self, symbols, max_age=20):
-        """ราคาล่าสุดแบบแคช: ถามกระดานเฉพาะเหรียญที่ข้อมูลเก่ากว่า max_age วินาที"""
+        """ราคาล่าสุดแบบแคช: ถามกระดานเฉพาะหุ้นที่ข้อมูลเก่ากว่า max_age วินาที"""
         now = time.time()
         need = [s for s in symbols if now - self.px_cache.get(s, (0, 0))[0] > max_age]
         if need:
@@ -99,12 +95,12 @@ class Company:
     def equity(self, max_age=20):
         pos = self.acct.open_positions()
         px = self.prices([p["symbol"] for p in pos], max_age) if pos else {}
-        eq = self.ex.usdt_free() + sum(p["qty"] * px.get(p["symbol"], p["entry"]) for p in pos)
+        eq = self.ex.usdt_free() + self.ex.unsettled() + sum(p["qty"] * px.get(p["symbol"], p["entry"]) for p in pos)
         self.last_eq, self.last_eq_t = eq, time.time()
         return eq
 
     def equity_cached(self):
-        """สำหรับหน้าเว็บ/LINE: ใช้ค่าที่ลูปหลักคำนวณไว้ ไม่ต้องรอ Binance"""
+        """สำหรับหน้าเว็บ/LINE: ใช้ค่าที่ลูปหลักคำนวณไว้ ไม่ต้องรอ Webull"""
         if self.last_eq is None or time.time() - self.last_eq_t > 120:
             try:
                 return self.equity(60)
@@ -146,7 +142,7 @@ class Company:
                 "win_rate": tr["win_rate"], "trades": tr["trades"]}
 
     def day_start_equity(self, eq):
-        key = "day_start_" + now_th().date().isoformat()
+        key = "day_start_" + now_th().date().isoformat()  # วันตามเวลาไทย (ตลาดสหรัฐฯ เปิด 20:30/21:30 - ปิด 03:00/04:00)
         v = self.acct.get(key)
         if v is None:
             self.acct.set(key, eq)
@@ -158,23 +154,67 @@ class Company:
             self.acct.set("paper_wallet", self.ex.paper)
 
     def start(self):
-        self.log("CEO", "เปิดบริษัท กระดาน %s (%s) โหมด %s ความเสี่ยง%s" % (
-            "Binance TH" if self.ex.th else "Binance.com", self.ex.quote, self.mode.upper(), RISK_PROFILES[self.risk]["name"]))
-        self.ex.sync_time()
+        self.log("CEO", "เปิดบริษัทเทรดหุ้น Webull Thailand โหมด %s ความเสี่ยง%s (%s)" % (
+            self.mode.upper(), RISK_PROFILES[self.risk]["name"], RISK_PROFILES[self.risk]["style"]))
         self.ex.load_filters()
-        self.log("CEO", "โหลดข้อมูลเหรียญคู่ %s ที่เทรดได้ %d คู่" % (self.ex.quote, len(self.ex.filters)))
-        if not self.ex.filters:
-            raise BinanceError("ไม่พบเหรียญคู่ %s บนกระดานนี้ ลองตั้ง quote ใน config.json" % self.ex.quote)
+        self.log("CEO", "รายชื่อหุ้น/ETF ที่สแกน %d ตัว (แก้ได้ใน universe.py)" % len(self.ex.filters))
         if self.mode != "paper":
-            self.log("CEO", "เงิน %s ในบัญชี: %.2f" % (self.ex.quote, self.ex.usdt_free()))
+            self.log("CEO", "บัญชี %s เงิน USD ที่ซื้อได้: %.2f" % (self.ex.ensure_account(), self.ex.usdt_free()))
+            self.reconcile()
         self.status = "running"
         # กันสแปมตอนบอทรีสตาร์ตซ้ำๆ: แจ้งว่าเริ่มงานไม่เกินครึ่งชั่วโมงละครั้ง
         self.line.send("✅ บอทเริ่มทำงานแล้ว\nโหมด: %s | ความเสี่ยง: %s\nเงินในบัญชี: %.2f %s\nถือไม้อยู่: %d" % (
             self.mode_label(), RISK_PROFILES[self.risk]["name"], self.ex.usdt_free(), self.ex.quote,
             len(self.acct.open_positions())), key="start", every_sec=1800)
 
+    def reconcile(self):
+        """เทียบไม้ในบัญชีบอทกับหุ้นในพอร์ต Webull จริง (เผื่อขายเองในแอป) — แจ้งเตือน ไม่ขายเอง"""
+        try:
+            have = self.ex.broker_positions()
+        except Exception as e:
+            self.log("ฝ่ายบัญชี", "อ่านพอร์ต Webull ไม่ได้: %s" % e)
+            return
+        for p in self.acct.open_positions():
+            if have.get(p["symbol"], 0) < p["qty"] * 0.98:
+                self.log("ฝ่ายบัญชี", "⚠️ บอทบันทึกว่าถือ %s %.5g หุ้น แต่ในพอร์ตมี %.5g (ขายเองในแอป?) ปิดไม้นี้ในบัญชีบอท" % (
+                    p["symbol"], p["qty"], have.get(p["symbol"], 0)), line=True)
+                px = self.prices([p["symbol"]], 60).get(p["symbol"], p["entry"])
+                self.acct.close_position(p["id"], px, p["qty"] * px, "ขายนอกบอท")
+
+    def eod_exit(self):
+        """ระดับเสี่ยงสูง (เทรดระยะสั้น): ขายหมดก่อนตลาดปิด ไม่ถือข้ามคืน กันราคาเปิดกระโดด (gap)"""
+        mins = float(self.cfg.get("eod_exit_minutes", 10))
+        if not (self.clock.get("open") and self.clock.get("mins_to_close", 999) <= mins):
+            return
+        for p in self.acct.open_positions():
+            if p.get("risk") == "high" or self.cfg.get("eod_exit_all"):
+                try:
+                    self.exe.sell(p, "ขายก่อนตลาดปิด (ไม่ถือข้ามคืน)")
+                except Exception as e:
+                    self.log("ฝ่ายเทรด", "ขาย %s ก่อนตลาดปิดไม่สำเร็จ: %s" % (p["symbol"], e), line=True)
+
     def cycle(self):
-        """1 รอบการทำงาน: เฝ้าสถานะ → (ถึงเวลา) สแกน → กลยุทธ์ → AI → ความเสี่ยง → ส่งคำสั่ง"""
+        """1 รอบการทำงาน: เวลาตลาด → เฝ้าสถานะ → (ถึงเวลา) สแกน → กลยุทธ์ → AI → ความเสี่ยง → ส่งคำสั่ง"""
+        self.clock = market_clock(self.cfg.get("extra_holidays", ()))
+        if not self.clock["open"]:  # ตลาดปิด: ราคาไม่ขยับ ขายไม่ได้ แค่บันทึกสถานะ
+            self.sell_queue.clear()
+            self.heartbeat()
+            if time.time() - self.last_eq_t > 1800:
+                self.acct.record_equity(self.equity(600))
+            if self.status != "market_closed":
+                nxt = self.clock.get("next_open")
+                self.log("CEO", "ตลาดหุ้นสหรัฐฯ ปิด รอเปิด%s (ไม้ที่ถืออยู่ %d ไม้)" % (
+                    (" " + nxt.astimezone(now_th().tzinfo).strftime("%a %d/%m %H:%M น.")) if nxt else "",
+                    len(self.acct.open_positions())))
+                self.status = "market_closed"
+            self.save_paper()
+            self.daily_report()
+            return
+        if self.status == "market_closed":
+            self.status = "running"
+            self.log("CEO", "ตลาดเปิดแล้ว เริ่มงาน", line=bool(self.cfg.get("line_market_open", False)))
+        self.cfg["_day_frac"] = min(1.0, max(0.15, self.clock["mins_since_open"] / 390))
+        self.eod_exit()
         while self.sell_queue:  # ทำคำสั่งขายที่สั่งมาจาก LINE ก่อน
             sym = self.sell_queue.pop(0)
             for p in self.acct.open_positions():
@@ -197,13 +237,23 @@ class Company:
             self.save_paper()
             return
         self.last_scan = time.time()
+        first = float(self.cfg.get("skip_first_minutes", 15))
+        last = float(self.cfg.get("no_entry_last_minutes", 20 if not cfg["eod_exit"] else 30))
+        if self.clock["mins_since_open"] < first:
+            self.last_scan = time.time() - cfg["every_min"] * 60 + 120  # ลองใหม่ใน 2 นาที
+            self.log("CEO", "ตลาดเพิ่งเปิด %.0f นาที: รอให้ราคานิ่งก่อน (%g นาทีแรกผันผวนสูง ไม่เปิดไม้ใหม่)" % (
+                self.clock["mins_since_open"], first))
+            return
+        if self.clock["mins_to_close"] < last:
+            self.log("CEO", "ใกล้ตลาดปิด (เหลือ %.0f นาที) ไม่เปิดไม้ใหม่" % self.clock["mins_to_close"])
+            return
         day0 = self.day_start_equity(eq)
         if not self.riskd.can_trade(eq, day0):
             self.log("CEO", "สั่งงานรอบนี้: งดเปิดไม้ใหม่ (หยุดไว้/ขาดทุนถึงเพดาน) เฝ้าไม้ที่ถือ %d ไม้ต่อ" % len(self.acct.open_positions()))
             return
         self.regime = self.research.market_regime()
         if self.regime == "bear" and self.cfg.get("skip_bear_market", True) and self.risk != "high":
-            self.log("CEO", "สั่งงานรอบนี้: ตลาดขาลง งดเปิดไม้ใหม่ (ตั้ง skip_bear_market=false เพื่อปิด)")
+            self.log("CEO", "สั่งงานรอบนี้: ตลาดขาลง (SPY ต่ำกว่า MA200) งดเปิดไม้ใหม่ (ตั้ง skip_bear_market=false เพื่อปิด)")
             return
         held = {p["symbol"] for p in self.acct.open_positions()}
         self.last_research = self.research.scan(self.risk)
@@ -233,15 +283,19 @@ class Company:
                 self.log("ฝ่ายเทรด", "ซื้อ %s ไม่สำเร็จ: %s" % (o["symbol"], e))
                 self.acct.add_decision("ฝ่ายเทรด", o["symbol"], False, "ส่งคำสั่งซื้อไม่สำเร็จ: %s" % e)
         # CEO สรุปงานทุกรอบ: เห็นว่าบอททำงานอยู่ แม้ไม่มีใครเปิดแดชบอร์ด
-        self.log("CEO", "สั่งงานรอบนี้: วิจัย %d เหรียญ → กลยุทธ์เสนอ %d → ผ่าน AI %d → ซื้อ %d%s · ถือ %d/%d ไม้ · ตลาด %s" % (
+        self.log("CEO", "สั่งงานรอบนี้: วิจัย %d ตัว → กลยุทธ์เสนอ %d → ผ่าน AI %d → ซื้อ %d%s · ถือ %d/%d ไม้ · ตลาด %s" % (
             len(self.last_research), n_prop, n_ok, len(bought), (" (%s)" % ", ".join(bought)) if bought else "",
             len(self.acct.open_positions()), RISK_PROFILES[self.risk]["max_pos"], self.regime))
         self.save_paper()
         self.daily_report()
 
     def daily_report(self):
+        """สรุปหลังตลาดสหรัฐฯ ปิด (ราว 04:30-05:30 น. เวลาไทย) วันละครั้ง"""
+        ny = ny_now()
+        if ny.weekday() >= 5 or ny.hour < 16 or (ny.hour == 16 and ny.minute < 15):
+            return
         today = now_th().date().isoformat()
-        if self.acct.get("report_day") == today or now_th().hour < 21:
+        if self.acct.get("report_day") == today:
             return
         s = self.acct.summary()
         s["equity"] = round(self.equity(), 2)
@@ -254,7 +308,7 @@ class Company:
         self.acct.prune()
         day0 = self.acct.get("day_start_" + today) or s["equity"]
         chg = (s["equity"] / day0 - 1) * 100 if day0 else 0
-        self.line.send("📊 สรุปประจำวัน %s (%s)\nมูลค่าพอร์ต: %.2f %s (วันนี้ %+.2f%%)\nกำไร/ขาดทุนสะสม: %+.2f\n"
+        self.line.send("📊 [หุ้น Webull] สรุปประจำวัน %s (%s)\nมูลค่าพอร์ต: %.2f %s (วันนี้ %+.2f%%)\nกำไร/ขาดทุนสะสม: %+.2f\n"
                        "เทรดแล้ว %d ไม้ ชนะ %s%% | ถืออยู่ %d ไม้\nตลาด: %s\n(ได้ข้อความนี้ทุกคืน = บอทยังทำงานอยู่)%s" % (
                            today, self.mode_label(), s["equity"], self.ex.quote, chg, s["realized_pnl"],
                            s["trades"], s["win_rate"], s["open"], self.regime,
@@ -262,10 +316,10 @@ class Company:
 
     def unguarded_note(self):
         try:
-            n = len([p for p in self.acct.open_positions() if not p["oco_id"]])
+            n = len(self.acct.open_positions())
         except Exception:
             return ""
-        return ("\n⚠️ มี %d ไม้ที่บอทต้องเฝ้า stop loss เอง ถ้าแก้ไม่ได้ให้เข้าแอป Binance ขายเอง" % n) if n else ""
+        return ("\n⚠️ มี %d ไม้ที่บอทเฝ้า stop loss เอง ถ้าบอทยังไม่กลับมา ให้เข้าแอป Webull ตั้ง stop หรือขายเอง" % n) if n else ""
 
     # ------------------------------------------------------------ ทำงาน 24 ชม.
     HB = os.path.join(HERE, "heartbeat.json")
@@ -314,12 +368,12 @@ class Company:
         threading.Thread(target=go, daemon=True).start()
 
     def monitor_loop(self):
-        """เฝ้าไม้ที่ถือทุก 10 วินาที แยกจากการสแกนตลาด: ระหว่างสแกนหลายร้อยเหรียญ (นานหลายนาที)
+        """เฝ้าไม้ที่ถือทุก 10 วินาที แยกจากการสแกนตลาด: ระหว่างสแกนหลายสิบตัว (นานหลายนาที)
         ราคาถึง stop / เป้า / ล็อกกำไร ก็ขายได้ทันที"""
         every = max(3, int(self.cfg.get("monitor_seconds", 10)))
         while True:
             time.sleep(every)
-            if self.status != "running":
+            if self.status != "running" or not self.clock.get("open"):
                 continue
             try:
                 self.exe.monitor()
@@ -376,7 +430,7 @@ class Company:
                 fails = 0
             except Exception as e:
                 fails += 1
-                self.log("CEO", ("Binance ผิดพลาด: %s" if isinstance(e, BinanceError) else "ผิดพลาด: %s") % e)
+                self.log("CEO", ("Webull ผิดพลาด: %s" if isinstance(e, BinanceError) else "ผิดพลาด: %s") % e)
                 if not isinstance(e, BinanceError):
                     traceback.print_exc()
                 if fails == 3:  # พลาด 3 รอบติด (ไม่ใช่สะดุดครั้งเดียว) ค่อยแจ้ง
@@ -387,11 +441,18 @@ class Company:
             time.sleep(self.cfg.get("loop_seconds", 30))
 
 
+def make_client(cfg, mode=None):
+    return Webull(mode or cfg["mode"], os.environ.get("WEBULL_APP_KEY", ""), os.environ.get("WEBULL_APP_SECRET", ""),
+                  fee=cfg.get("fee", 0.001), paper_balance=cfg.get("paper_balance_usd", 1000),
+                  region=cfg.get("region", "th"), account_id=os.environ.get("WEBULL_ACCOUNT_ID", cfg.get("account_id", "")),
+                  fractional=cfg.get("fractional", True), extra_holidays=cfg.get("extra_holidays", ()))
+
+
 def confirm_live(cfg):
     print("\n" + "=" * 60)
-    print("⚠️  โหมด LIVE: บอทจะซื้อขายด้วยเงินจริงในบัญชี Binance ของคุณ")
-    print("   ใช้ทุนไม่เกิน %.0f (สกุลเงินที่เทรด), ขาดทุนต่อวันเกิน %s%% จะหยุดเปิดไม้ใหม่" % (
-        cfg.get("max_capital_usdt", 100), cfg.get("max_daily_loss_pct", 5)))
+    print("⚠️  โหมด LIVE: บอทจะซื้อขายหุ้นด้วยเงินจริงในบัญชี Webull ของคุณ")
+    print("   ใช้ทุนไม่เกิน $%.0f, ขาดทุนต่อวันเกิน %s%% จะหยุดเปิดไม้ใหม่" % (
+        cfg.get("max_capital_usd", 100), cfg.get("max_daily_loss_pct", 3)))
     print("   ขาดทุนได้จริง ไม่มีอะไรรับประกันกำไร")
     print("=" * 60)
     # รันเป็น service บน VPS ไม่มีคนพิมพ์ยืนยัน: ให้ใส่ "live_confirmed": "ยืนยันเงินจริง" ใน config.json แทน
@@ -409,12 +470,11 @@ def confirm_live(cfg):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default=os.path.join(HERE, "config.json"))
-    ap.add_argument("--mode", choices=["paper", "testnet", "live"])
+    ap.add_argument("--mode", choices=["paper", "live"])
     ap.add_argument("--risk", choices=list(RISK_PROFILES))
-    ap.add_argument("--port", type=int, default=8080)
-    ap.add_argument("--check", action="store_true", help="ตรวจการเชื่อมต่อกระดานและยอดเงิน โดยไม่ซื้อขาย")
-    ap.add_argument("--exchange", choices=["binance", "binance_th"])
-    ap.add_argument("--markets", action="store_true", help="แสดงคู่เหรียญทั้งหมดที่ API เปิดให้")
+    ap.add_argument("--port", type=int, default=8081)
+    ap.add_argument("--check", action="store_true", help="ตรวจการเชื่อมต่อ Webull และยอดเงิน โดยไม่ซื้อขาย")
+    ap.add_argument("--check-order", action="store_true", help="ให้ Webull ตรวจคำสั่งซื้อ SPY $5 แบบ preview (ไม่ซื้อจริง)")
     ap.add_argument("--test-line", action="store_true", help="ส่งข้อความทดสอบเข้า LINE")
     ap.add_argument("--host", default="127.0.0.1", help="0.0.0.0 = เปิดให้เครื่องอื่นเข้าได้ (ต้องตั้ง DASHBOARD_PASSWORD)")
     a = ap.parse_args()
@@ -424,13 +484,9 @@ def main():
         cfg["mode"] = a.mode
     if a.risk:
         cfg["risk"] = a.risk
-    if a.exchange:
-        cfg["exchange"] = a.exchange
-    if a.markets:
-        ex = Binance("paper", exchange=cfg.get("exchange", "binance"), quote=cfg.get("quote"))
-        for k, v in ex.list_markets().items():
-            print("%s => %s" % (k, v))
-        return
+    for s, sec in (cfg.get("extra_symbols") or {}).items():
+        import universe
+        universe.UNIVERSE[s.upper()] = (sec, "stock")
     if a.test_line:
         n = LineNotifier(cfg)
         if not n.enabled:
@@ -440,12 +496,15 @@ def main():
         else:
             print("❌ ส่งไม่สำเร็จ: ตรวจ token / user ID และต้องกดเพิ่มเพื่อน LINE OA ของบอทก่อน")
         return
-    if a.check:
+    if a.check or a.check_order:
         try:
-            ex = Binance(cfg["mode"], os.environ.get("BINANCE_API_KEY", ""), os.environ.get("BINANCE_API_SECRET", ""),
-                         exchange=cfg.get("exchange", "binance"), quote=cfg.get("quote"))
-            print(json.dumps(ex.check(), ensure_ascii=False, indent=2))
-            print("✅ เชื่อมต่อได้")
+            ex = make_client(cfg, "live")
+            if a.check:
+                print(json.dumps(ex.check(), ensure_ascii=False, indent=2, default=str))
+                print("✅ เชื่อมต่อ Webull ได้")
+            if a.check_order:
+                print(json.dumps(ex.check_order(), ensure_ascii=False, indent=2, default=str))
+                print("✅ Webull ตรวจคำสั่งผ่าน (ไม่ได้ซื้อจริง)")
         except Exception as e:
             print("❌ ผิดพลาด:", e)
         return
@@ -453,7 +512,8 @@ def main():
         confirm_live(cfg)
     co = Company(cfg)
     co.keep_thread("แดชบอร์ด", dashboard.serve, co, a.port, a.host)
-    line_bot.serve(co, cfg.get("line_webhook_port", 8090))
+    if cfg.get("line_commands", False):  # LINE OA 1 บัญชีมี webhook ได้ที่เดียว (ปกติเป็นของบอทคริปโต)
+        line_bot.serve(co, cfg.get("line_webhook_port", 8091))
     print("แดชบอร์ด: http://localhost:%d" % a.port)
 
     def stop(*_):  # systemctl stop/restart = ปิดแบบตั้งใจ ไม่ต้องแจ้งว่าดับ
@@ -466,7 +526,7 @@ def main():
     except KeyboardInterrupt:
         co.save_paper()
         co.heartbeat(clean=True)
-        print("\nปิดบริษัทแล้ว (สถานะที่ถืออยู่ยังอยู่ ถ้าตั้ง OCO ไว้ คำสั่งขายยังรออยู่บน Binance)")
+        print("\nปิดบริษัทแล้ว (หุ้นที่ถืออยู่ยังอยู่ในพอร์ต Webull แต่ไม่มีใครเฝ้า stop loss จนกว่าจะเปิดบอทใหม่)")
 
 
 if __name__ == "__main__":

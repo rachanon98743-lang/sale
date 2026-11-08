@@ -1,6 +1,9 @@
 *.db
+*.db*
 STOP
 __pycache__/
-line_state.json
+conf/
 heartbeat.json
 line_last_webhook.txt
+line_state.json
+venv/

@@ -2,7 +2,7 @@
 """richmenu.py — ติดตั้งริชเมนู 6 ปุ่ม + แถบเปิดแดชบอร์ด ให้ LINE OA (รันซ้ำเพื่อแทนของเดิม)
 
     python3 richmenu.py          # ใช้ LINE_CHANNEL_ACCESS_TOKEN จาก environment
-ลิงก์แดชบอร์ด: ใช้ DASHBOARD_URL ถ้าตั้งไว้ ไม่งั้นใช้ IP Tailscale ของ VPS พอร์ต 8080
+ลิงก์แดชบอร์ด: ใช้ DASHBOARD_URL ถ้าตั้งไว้ ไม่งั้นใช้ IP Tailscale ของ VPS พอร์ต 8081
 """
 
 import json
@@ -42,8 +42,8 @@ def dashboard_url(strict=True):
                                        timeout=10).stdout)
         name = (st.get("Self", {}).get("DNSName") or "").rstrip(".")
         if name:
-            return "http://%s:8080" % name
-        return "http://%s:8080" % st["Self"]["TailscaleIPs"][0]
+            return "http://%s:8081" % name
+        return "http://%s:8081" % st["Self"]["TailscaleIPs"][0]
     except Exception:
         if strict:
             sys.exit("❌ หาที่อยู่ Tailscale ไม่เจอ: ตั้ง DASHBOARD_URL ใน /root/bot.env แล้วรันใหม่")

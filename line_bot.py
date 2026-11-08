@@ -4,7 +4,7 @@
   LINE_CHANNEL_ACCESS_TOKEN, LINE_USER_ID   (ใช้ร่วมกับระบบแจ้งเตือน)
   LINE_CHANNEL_SECRET                       (Basic settings → Channel secret ใช้ตรวจว่าข้อความมาจาก LINE จริง)
 
-เปิดให้ LINE ส่ง webhook เข้ามาได้ด้วย Tailscale Funnel (HTTPS ฟรี):  tailscale funnel --bg 8090
+เปิดให้ LINE ส่ง webhook เข้ามาได้ด้วย Tailscale Funnel (HTTPS ฟรี):  tailscale funnel --bg 8091
 Webhook URL = https://<ชื่อเครื่อง>.<tailnet>.ts.net/line/webhook
 
 ความปลอดภัย:
@@ -34,15 +34,15 @@ LAST_HOOK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "line_last_
 HELP = """📋 คำสั่งที่ใช้ได้ (กดปุ่มด้านล่างแชทได้เลย)
 • สถานะ – มูลค่าพอร์ต กำไร โหมด
 • แผนก – งานล่าสุดของทุกแผนก (แตะดูทีละแผนก)
-• ไม่อนุมัติ – เหรียญที่ไม่ซื้อ พร้อมเหตุผลของแต่ละฝ่าย
+• ไม่อนุมัติ – หุ้นที่ไม่ซื้อ พร้อมเหตุผลของแต่ละฝ่าย
 • คาดการณ์ – ไม้ที่ถือ ถ้าถึงเป้า/โดนตัด ได้เสียเท่าไร
 • แดชบอร์ด – ลิงก์เปิดหน้าแดชบอร์ด (เปิด Tailscale ก่อน)
-• ไม้ที่ถือ – เหรียญที่ถืออยู่ + กำไร/ขาดทุนตอนนี้
+• ไม้ที่ถือ – หุ้นที่ถืออยู่ + กำไร/ขาดทุนตอนนี้
 • สรุปวันนี้ – ซื้อขายวันนี้ + ค่า AI
 • ตรวจไลน์ – ตรวจ/ซ่อมการเชื่อมต่อ LINE
 • หยุด – หยุดเปิดไม้ใหม่ (ไม้เดิมยังเฝ้าอยู่)
 • เริ่ม – กลับมาเปิดไม้ใหม่
-• ขาย BTC – ขายเหรียญนั้น (ต้องยืนยัน)
+• ขาย AAPL – ขายหุ้นนั้น (ต้องยืนยัน)
 • ขายหมด – ขายทุกไม้ (ต้องยืนยัน)
 • พิมพ์คำถามอะไรก็ได้ – ให้ AI ตอบจากข้อมูลพอร์ตจริง"""
 
@@ -214,8 +214,8 @@ class LineBot:
     def rejections_text(self):
         rows = self.co.acct.recent_decisions(15, only_rejected=True)
         if not rows:
-            return "ยังไม่มีเหรียญที่ถูกปฏิเสธ"
-        out = ["🚫 เหรียญที่ไม่ซื้อล่าสุด + เหตุผล"]
+            return "ยังไม่มีหุ้นที่ถูกปฏิเสธ"
+        out = ["🚫 หุ้นที่ไม่ซื้อล่าสุด + เหตุผล"]
         for r in rows:
             out.append("\n%s %s · %s\n%s" % (r["t"][11:16], r["symbol"], r["dept"], r["reason"][:250]))
         return "\n".join(out)[:4800]
@@ -261,7 +261,7 @@ class LineBot:
         alive = {n: t.is_alive() for n, (t, _) in co.threads.items()}
         lines.append("• " + " · ".join("%s %s" % (n, "✅" if a else "❌") for n, a in alive.items()))
         lines.append("• AI: %s" % ("✅ " + co.ai.model.split("-")[1].title() if co.ai.enabled else "ปิดอยู่"))
-        lines.append("• แจ้งเตือนเมื่อ VPS ดับ: %s" % ("✅ ตั้งแล้ว" if os.environ.get("HEALTHCHECK_URL") else "ยังไม่ตั้ง (manage.sh ข้อ 18)"))
+        lines.append("• แจ้งเตือนเมื่อ VPS ดับ: %s" % ("✅ ตั้งแล้ว" if os.environ.get("HEALTHCHECK_URL") else "ยังไม่ตั้ง (manage.sh ข้อ 14)"))
         if co.downtime_note:
             lines.append("• ⚠️ ครั้งล่าสุด: " + co.downtime_note)
         return "\n".join(lines)
@@ -276,7 +276,7 @@ class LineBot:
         q = co.ex.quote
         return ("📊 พอร์ต\nกระดาน: %s · %s\nความเสี่ยง: %s · ตลาด: %s\nมูลค่าพอร์ต: %.2f %s\nเงินสด: %.2f %s\n"
                 "กำไรที่ปิดแล้ว: %+.2f\nชนะ %d/%d ไม้ (%.0f%%) · ถืออยู่ %d ไม้%s") % (
-            "Binance TH" if co.ex.th else "Binance.com", {"live": "เงินจริง", "paper": "เงินจำลอง"}.get(co.mode, co.mode),
+            "Webull Thailand", {"live": "เงินจริง", "paper": "เงินจำลอง"}.get(co.mode, co.mode),
             RISK_PROFILES[co.risk]["name"], co.regime, eq, q, co.ex.usdt_free(), q, s["realized_pnl"],
             s["wins"], s["trades"], s["win_rate"], s["open"],
             "\n⏸ ตอนนี้หยุดเปิดไม้ใหม่อยู่" if os.path.exists("STOP") else "")
@@ -345,10 +345,10 @@ class LineBot:
         ctx = "%s\n\n%s\n\nบันทึกล่าสุด:\n%s" % (
             self.port_text(), self.positions_text(),
             "\n".join("%s %s: %s" % (l["t"][11:16], l["dept"], l["msg"]) for l in reversed(logs)))
-        prompt = ("คุณคือผู้ช่วยของบอทเทรดคริปโตอัตโนมัติ ตอบเจ้าของผ่าน LINE เป็นภาษาไทย สั้น กระชับ อ่านง่ายบนมือถือ "
+        prompt = ("คุณคือผู้ช่วยของบอทเทรดหุ้นสหรัฐฯอัตโนมัติ ตอบเจ้าของผ่าน LINE เป็นภาษาไทย สั้น กระชับ อ่านง่ายบนมือถือ "
                   "ใช้ข้อมูลจริงด้านล่างเท่านั้น ห้ามรับประกันกำไร ห้ามแนะนำเพิ่มความเสี่ยงหรือใช้เลเวอเรจ "
                   "คุณสั่งซื้อขายเองไม่ได้ ถ้าเจ้าของอยากให้ทำอะไร ให้บอกคำสั่งที่พิมพ์ได้: "
-                  "สถานะ, แผนก, ไม่อนุมัติ, คาดการณ์, ไม้ที่ถือ, สรุปวันนี้, หยุด, เริ่ม, ขาย <เหรียญ>, ขายหมด\n\n"
+                  "สถานะ, แผนก, ไม่อนุมัติ, คาดการณ์, ไม้ที่ถือ, สรุปวันนี้, หยุด, เริ่ม, ขาย <หุ้น>, ขายหมด\n\n"
                   "ข้อมูลตอนนี้:\n%s\n\nคำถาม: %s") % (ctx, question[:1000])
         try:
             return "🧠 " + ai._call(prompt, max_tokens=600, purpose="ตอบคำถามใน LINE").strip()
@@ -517,7 +517,7 @@ def reset_bar(bot):
         bot.co.log("CEO", "คืนแถบใต้แชท LINE ไม่ได้: %s" % e)
 
 
-def serve(company, port=8090):
+def serve(company, port=8091):
     bot = LineBot(company)
     bot.port = port
     bot.health = None
@@ -588,7 +588,7 @@ if __name__ == "__main__":  # python3 line_bot.py  = ตรวจ/ซ่อม�
     b = LineBot.__new__(LineBot)
     b.token = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
     b.secret = os.environ.get("LINE_CHANNEL_SECRET", "").strip()
-    b.port = 8090
+    b.port = 8091
     if not (b.token and b.secret):
         raise SystemExit("❌ ยังไม่ได้ตั้ง LINE token / Channel secret (manage.sh ข้อ 11 และ 13)")
     for ok, m in doctor(b, fix=True):

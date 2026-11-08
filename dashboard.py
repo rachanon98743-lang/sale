@@ -1,4 +1,4 @@
-"""dashboard.py — หน้าเว็บดูสถานะบริษัท (เปิดได้เฉพาะเครื่องตัวเอง http://localhost:8080)"""
+"""dashboard.py — หน้าเว็บดูสถานะบริษัท (เปิดได้เฉพาะเครื่องตัวเอง http://localhost:8081)"""
 
 import gzip
 import hashlib
@@ -33,7 +33,7 @@ def _dur(sec):
 
 class Snapshot:
     """สร้างข้อมูลหน้าเว็บไว้ล่วงหน้าทุก 4 วินาทีใน thread แยก: เปิดหน้าเว็บกี่เครื่องก็ไม่ไปถ่วงบอท
-    และไม่ต้องรอถาม Binance ระหว่างโหลดหน้า (สาเหตุหลักที่แดชบอร์ดเคยช้า)"""
+    และไม่ต้องรอถาม Webull ระหว่างโหลดหน้า (สาเหตุหลักที่แดชบอร์ดเคยช้า)"""
 
     def __init__(self, co):
         self.co = co
@@ -76,7 +76,7 @@ class Snapshot:
         research = [{k: r.get(k) for k in ("symbol", "price", "chg24", "rsi", "score", "why", "bt")} for r in co.last_research[:30]]
         return {
             "t": now_th().isoformat(timespec="seconds"),
-            "mode": co.mode + (" · Binance TH" if co.ex.th else ""), "quote": co.ex.quote,
+            "mode": co.mode + " · Webull", "quote": co.ex.quote,
             "risk": RISK_PROFILES[co.risk]["name"], "tf": RISK_PROFILES[co.risk]["tf"], "regime": co.regime,
             "equity": eq, "day_pct": (eq / day0 - 1) * 100 if day0 else 0, "equity_series": self.eq_series,
             "summary": co.acct.summary(), "positions": co.acct.open_positions(), "closed": co.acct.closed_positions(50),
@@ -109,7 +109,7 @@ class Snapshot:
 
 PAGE = r"""<!DOCTYPE html><html lang="th"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#0d1117">
-<title>AI Trading Company</title>
+<title>AI Stock Company (Webull)</title>
 <style>
 *{-webkit-tap-highlight-color:transparent}
 body{margin:0;background:#0d1117;color:#e6edf3;font:14px/1.5 system-ui,-apple-system,Tahoma,sans-serif;-webkit-text-size-adjust:100%}
@@ -143,11 +143,11 @@ svg{display:block;width:100%;height:auto}
 tr.click{cursor:pointer}tr.click:active{background:#21262d}
 .tabs button{padding:4px 10px;font-size:12px;margin:0 4px 6px 0}.tabs button.on{border-color:#58a6ff;color:#58a6ff}
 </style></head><body><main>
-<h1>🏢 AI Trading Company <span id="mode"></span> <a href="/logout" style="float:right;font-size:13px;color:#8b949e">ออกจากระบบ</a></h1>
+<h1>🏢 AI Stock Company (Webull) <span id="mode"></span> <a href="/logout" style="float:right;font-size:13px;color:#8b949e">ออกจากระบบ</a></h1>
 <div class="strip" id="strip"><span>กำลังโหลด...</span></div>
 
 <div class="card"><div class="grid">
-<div class="s"><span>มูลค่าพอร์ต (<span id="q">USDT</span>)</span><b id="eq">-</b></div>
+<div class="s"><span>มูลค่าพอร์ต (<span id="q">USD</span>)</span><b id="eq">-</b></div>
 <div class="s"><span>วันนี้</span><b id="day">-</b></div>
 <div class="s"><span>กำไรที่ปิดแล้ว</span><b id="pnl">-</b></div>
 <div class="s"><span>ชนะ / ทั้งหมด</span><b id="wr">-</b></div>
@@ -161,13 +161,13 @@ tr.click{cursor:pointer}tr.click:active{background:#21262d}
 <div class="card"><h3>📐 คาดการณ์ไม้ที่ถือ <span class="m" style="font-weight:400;font-size:12px">ประเมินจากสถิติ ไม่ใช่การรับประกัน</span></h3><div id="fc"></div></div>
 
 <div class="card"><h3>📈 กราฟ <span id="chTitle" class="m" style="font-weight:400"></span></h3>
-<div class="tabs" id="chTabs"></div><div id="chart" class="m">แตะเหรียญในตาราง "สถานะที่ถืออยู่" หรือ "ผลวิจัย" เพื่อดูกราฟ</div></div>
+<div class="tabs" id="chTabs"></div><div id="chart" class="m">แตะหุ้นในตาราง "สถานะที่ถืออยู่" หรือ "ผลวิจัย" เพื่อดูกราฟ</div></div>
 
-<div class="card"><h3>สถานะที่ถืออยู่</h3><div class="sc"><table><thead><tr><th>เหรียญ</th><th>ตอนนี้</th><th>ราคาซื้อ</th><th>ทุน</th><th>SL</th><th>TP</th><th>เหตุผล</th></tr></thead><tbody id="pos"></tbody></table></div></div>
+<div class="card"><h3>สถานะที่ถืออยู่</h3><div class="sc"><table><thead><tr><th>หุ้น</th><th>ตอนนี้</th><th>ราคาซื้อ</th><th>ทุน</th><th>SL</th><th>TP</th><th>เหตุผล</th></tr></thead><tbody id="pos"></tbody></table></div></div>
 
 <div class="card"><h3>🚫 ไม่อนุมัติล่าสุด + เหตุผล</h3><div class="sc" id="dec"></div></div>
 
-<div class="card"><h3>ผลวิจัยล่าสุด</h3><div class="sc"><table><thead><tr><th>เหรียญ</th><th>ราคา</th><th>24ชม.</th><th>RSI</th><th>คะแนน</th><th>ย้อนหลังชนะ</th><th>คาดหวัง/ไม้</th><th>เหตุผล</th></tr></thead><tbody id="res"></tbody></table></div></div>
+<div class="card"><h3>ผลวิจัยล่าสุด</h3><div class="sc"><table><thead><tr><th>หุ้น</th><th>ราคา</th><th>24ชม.</th><th>RSI</th><th>คะแนน</th><th>ย้อนหลังชนะ</th><th>คาดหวัง/ไม้</th><th>เหตุผล</th></tr></thead><tbody id="res"></tbody></table></div></div>
 
 <div class="card"><h3>🧠 ฝ่ายนักวิเคราะห์ AI · งบและการใช้ token</h3>
 <div id="aiState" class="m"></div>
@@ -195,7 +195,7 @@ tr.click{cursor:pointer}tr.click:active{background:#21262d}
 ในแชทกดปุ่มลัด: แผนก · ไม่อนุมัติ · คาดการณ์ (ตอบกลับไม่กินโควตา) · LINE OA ฟรี 300 ข้อความ/เดือน</p>
 </div>
 
-<div class="card"><h3>ประวัติการเทรด</h3><div class="sc"><table><thead><tr><th>เหรียญ</th><th>ซื้อ</th><th>ขาย</th><th>กำไร</th><th>เหตุผล</th><th>ปิดเมื่อ</th></tr></thead><tbody id="hist"></tbody></table></div></div>
+<div class="card"><h3>ประวัติการเทรด</h3><div class="sc"><table><thead><tr><th>หุ้น</th><th>ซื้อ</th><th>ขาย</th><th>กำไร</th><th>เหตุผล</th><th>ปิดเมื่อ</th></tr></thead><tbody id="hist"></tbody></table></div></div>
 </main><script>
 const f=(n,d=2)=>Number(n??0).toLocaleString('en-US',{maximumFractionDigits:d,minimumFractionDigits:d});
 const p6=n=>{n=Number(n);const a=Math.abs(n);return a>=100?f(n,2):a>=1?f(n,4):n.toPrecision(4);};
@@ -240,7 +240,7 @@ document.addEventListener('click',e=>{const tr=e.target.closest('tr[data-s]');if
 function render(){
 $('mode').innerHTML=D.mode.startsWith('live')?'<span class="live">เงินจริง'+esc(D.mode.slice(4))+'</span>':'<span class="m">'+esc(D.mode)+'</span>';
 const H=D.health;put('strip',`<span>${H.loop_age<180?'🟢 ทำงานอยู่':'🔴 ลูปหลักไม่ขยับ '+Math.floor(H.loop_age/60)+' นาที'}</span><span>อัปเดต ${esc(D.t.slice(11,19))}</span><span>เปิดมาแล้ว ${H.uptime}</span>${H.down?'<span class="a">⚠️ '+esc(H.down)+'</span>':''}`);
-$('eq').textContent=f(D.equity);$('q').textContent=D.quote||'USDT';$('day').innerHTML='<span class="'+c(D.day_pct)+'">'+(D.day_pct>0?'+':'')+f(D.day_pct)+'%</span>';
+$('eq').textContent=f(D.equity);$('q').textContent=D.quote||'USD';$('day').innerHTML='<span class="'+c(D.day_pct)+'">'+(D.day_pct>0?'+':'')+f(D.day_pct)+'%</span>';
 $('pnl').innerHTML='<span class="'+c(D.summary.realized_pnl)+'">'+f(D.summary.realized_pnl)+'</span>';
 $('wr').textContent=D.summary.wins+' / '+D.summary.trades+' ('+D.summary.win_rate+'%)';$('reg').textContent=D.regime;
 put('eqChart',line(D.equity_series));
@@ -294,7 +294,7 @@ form{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:24px
 input,button{width:100%;box-sizing:border-box;padding:12px;margin-top:10px;border-radius:8px;font-size:16px}
 input{background:#0d1117;color:#e6edf3;border:1px solid #30363d}button{background:#58a6ff;border:0;font-weight:600}
 p{color:#f85149;min-height:1em}</style></head><body>
-<form method="post" action="/login"><h2>🏢 AI Trading Company</h2>
+<form method="post" action="/login"><h2>🏢 AI Stock Company (Webull)</h2>
 <input type="password" name="password" placeholder="รหัสผ่าน" autofocus required>
 <button>เข้าสู่ระบบ</button><p>%MSG%</p></form></body></html>"""
 
@@ -336,7 +336,7 @@ def serve(company, port, host="127.0.0.1"):
             if not password:
                 return True
             c = http.cookies.SimpleCookie(self.headers.get("Cookie", ""))
-            tok = c["sid"].value if "sid" in c else ""
+            tok = c["wsid"].value if "wsid" in c else ""
             with lock:
                 exp = sessions.get(tok)
                 if exp and exp > time.time():
@@ -355,8 +355,8 @@ def serve(company, port, host="127.0.0.1"):
             if self.path == "/logout":
                 c = http.cookies.SimpleCookie(self.headers.get("Cookie", ""))
                 with lock:
-                    sessions.pop(c["sid"].value if "sid" in c else "", None)
-                return self._send(302, "", "text/plain", {"Location": "/", "Set-Cookie": "sid=; Max-Age=0; Path=/"})
+                    sessions.pop(c["wsid"].value if "wsid" in c else "", None)
+                return self._send(302, "", "text/plain", {"Location": "/", "Set-Cookie": "wsid=; Max-Age=0; Path=/"})
             if self.path == "/api/status":
                 body, gz, tag = snap.get()
                 if self.headers.get("If-None-Match") == tag:
@@ -373,7 +373,7 @@ def serve(company, port, host="127.0.0.1"):
                 sym = (qs.get("symbol") or [""])[0].upper()
                 tf = (qs.get("tf") or [RISK_PROFILES[company.risk]["tf"]])[0]
                 if sym not in company.ex.filters or tf not in ("15m", "1h", "4h", "1d"):
-                    return self._send(400, json.dumps({"error": "เหรียญ/ช่วงเวลาไม่ถูกต้อง"}, ensure_ascii=False), "application/json; charset=utf-8")
+                    return self._send(400, json.dumps({"error": "หุ้น/ช่วงเวลาไม่ถูกต้อง"}, ensure_ascii=False), "application/json; charset=utf-8")
                 hit = chart_cache.get((sym, tf))
                 if hit and time.time() - hit[0] < 60:
                     out = hit[1]
@@ -408,7 +408,7 @@ def serve(company, port, host="127.0.0.1"):
                     company.log("CEO", "เข้าสู่ระบบแดชบอร์ดจาก %s" % ip)
                     return self._send(302, "", "text/plain", {
                         "Location": "/",
-                        "Set-Cookie": "sid=%s; HttpOnly; SameSite=Strict; Path=/; Max-Age=%d" % (tok, SESSION_SECONDS)})
+                        "Set-Cookie": "wsid=%s; HttpOnly; SameSite=Strict; Path=/; Max-Age=%d" % (tok, SESSION_SECONDS)})
                 with lock:
                     fails[ip] = (n + 1, t0)
                 company.log("CEO", "ใส่รหัสแดชบอร์ดผิดจาก %s (ครั้งที่ %d)" % (ip, n + 1))
