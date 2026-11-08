@@ -119,15 +119,11 @@ class LineBot:
         return self.ask_ai(text)
 
     def dashboard_text(self):
-        url = os.environ.get("DASHBOARD_URL", "").strip()
+        from richmenu import dashboard_url
+        url = dashboard_url(strict=False)
         if not url:
-            try:
-                import subprocess
-                ip = subprocess.run(["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=10).stdout.split()[0]
-                url = "http://%s:8080" % ip
-            except Exception:
-                return "หาลิงก์แดชบอร์ดไม่เจอ: ตั้ง DASHBOARD_URL ใน /root/bot.env"
-        return "📊 แดชบอร์ด\n%s\n\nเปิดแอป Tailscale ในมือถือก่อน แล้วค่อยกดลิงก์" % url
+            return "หาลิงก์แดชบอร์ดไม่เจอ: ตั้ง DASHBOARD_URL ใน /root/bot.env"
+        return "📊 แดชบอร์ด\n%s\n\n(ตั้ง VPN On Demand ในแอป Tailscale ไว้ จะเปิดได้ทันทีไม่ต้องกดเปิด Tailscale)" % url
 
     def status_text(self):
         co = self.co

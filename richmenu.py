@@ -32,15 +32,22 @@ def call(method, url, token, body=None, ctype="application/json"):
         sys.exit("❌ LINE ตอบ HTTP %s: %s" % (e.code, e.read().decode(errors="replace")[:300]))
 
 
-def dashboard_url():
+def dashboard_url(strict=True):
+    """ลิงก์แดชบอร์ด: DASHBOARD_URL > ชื่อ MagicDNS (*.ts.net ให้ iPhone เปิด Tailscale อัตโนมัติได้) > IP Tailscale"""
     url = os.environ.get("DASHBOARD_URL", "").strip()
     if url:
         return url
     try:
-        ip = subprocess.run(["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=10).stdout.split()[0]
-        return "http://%s:8080" % ip
+        st = json.loads(subprocess.run(["tailscale", "status", "--json"], capture_output=True, text=True,
+                                       timeout=10).stdout)
+        name = (st.get("Self", {}).get("DNSName") or "").rstrip(".")
+        if name:
+            return "http://%s:8080" % name
+        return "http://%s:8080" % st["Self"]["TailscaleIPs"][0]
     except Exception:
-        sys.exit("❌ หา IP Tailscale ไม่เจอ: ตั้ง DASHBOARD_URL ใน /root/bot.env แล้วรันใหม่")
+        if strict:
+            sys.exit("❌ หาที่อยู่ Tailscale ไม่เจอ: ตั้ง DASHBOARD_URL ใน /root/bot.env แล้วรันใหม่")
+        return None
 
 
 def main():
