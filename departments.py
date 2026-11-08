@@ -27,8 +27,8 @@ RISK_PROFILES = {
     "high": {"name": "สูง",  "tf": "15m", "min_vol_m": 3,   "max_coins": 80, "size": 0.20, "sl": 0.08, "tp": 0.20, "max_pos": 5, "min_score": 65, "every_min": 5},
 }
 # Binance TH: วอลุ่มซื้อขายขั้นต่ำต่อวัน (ล้านบาท) เหรียญที่ต่ำกว่านี้ไม่สแกนเลย (แก้ได้ด้วย th_min_vol_m ใน config.json)
-TH_MIN_VOL_M = {"low": 3, "mid": 1, "high": 0.5}
-TH_USDT_MIN_VOL_M = {"low": 0.1, "mid": 0.02, "high": 0.01}  # Binance TH คู่ USDT (ล้าน USDT/วัน)  # Binance TH มีคู่บาทแค่ ~11 คู่ ตั้งต่ำไว้ ให้ตัวตรวจสภาพคล่องก่อนซื้อคุมแทน
+TH_MIN_VOL_M = {"low": 3, "mid": 1, "high": 0.5}  # Binance TH มีคู่บาทแค่ ~11 คู่ ตั้งต่ำไว้ ให้ตัวตรวจสภาพคล่องก่อนซื้อคุมแทน
+TH_USDT_MIN_VOL_M = {"low": 0.1, "mid": 0.02, "high": 0.01}  # Binance TH คู่ USDT (ล้าน USDT/วัน)
 
 
 def liquidity_check(ex, symbol, amount, max_spread=0.005, max_slip=0.005, ticker=None):
