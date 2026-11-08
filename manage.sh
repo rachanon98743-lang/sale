@@ -31,6 +31,7 @@ while true; do
   echo "13) เปิดสั่งงานผ่านแชท LINE + ติดตั้งริชเมนู"
   echo "14) ดูคู่เหรียญทั้งหมดที่กระดานเปิดให้บอทเทรด"
   echo "15) Binance TH: เลือกเทรดคู่ THB (~11 เหรียญ) หรือคู่ USDT (~380 เหรียญ)"
+  echo "16) ติดตั้งริชเมนู LINE ใหม่ (มีปุ่มเปิดแดชบอร์ด)"
   echo " 0) ออก"
   read -r -p "เลือก: " c
   case "$c" in
@@ -99,6 +100,8 @@ PY
         systemctl restart tradingbot; echo "บันทึกแล้ว และรีสตาร์ทบอทแล้ว" ;;
     12) ( set -a; . "$ENV"; set +a; cd "$DIR" && python3 main.py --test-line ) ;;
     14) ( cd "$DIR" && python3 main.py --markets ) ;;
+    16) grep -q '^LINE_CHANNEL_ACCESS_TOKEN=' "$ENV" || { echo "ต้องทำข้อ 11 (ตั้ง LINE) ก่อน"; continue; }
+        ( set -a; . "$ENV"; set +a; cd "$DIR" && python3 richmenu.py ); systemctl restart tradingbot ;;
     15) read -r -p "สกุลเงินที่ใช้เทรด (THB/USDT): " q
         case "$q" in THB|USDT)
           [ "$(mode)" = live ] && echo "⚠️ โหมดเงินจริง: เพดานทุน (max_capital_usdt) จะนับเป็น $q และต้องมีเงิน $q ในบัญชี Binance TH"

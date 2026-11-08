@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""richmenu.py — ติดตั้งริชเมนู 6 ปุ่มให้ LINE OA (รันครั้งเดียว หรือรันซ้ำเพื่อแทนของเดิม)
+"""richmenu.py — ติดตั้งริชเมนู 6 ปุ่ม + แถบเปิดแดชบอร์ด ให้ LINE OA (รันซ้ำเพื่อแทนของเดิม)
 
     python3 richmenu.py          # ใช้ LINE_CHANNEL_ACCESS_TOKEN จาก environment
+ลิงก์แดชบอร์ด: ใช้ DASHBOARD_URL ถ้าตั้งไว้ ไม่งั้นใช้ IP Tailscale ของ VPS พอร์ต 8080
 """
 
 import json
 import os
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -30,6 +32,17 @@ def call(method, url, token, body=None, ctype="application/json"):
         sys.exit("❌ LINE ตอบ HTTP %s: %s" % (e.code, e.read().decode(errors="replace")[:300]))
 
 
+def dashboard_url():
+    url = os.environ.get("DASHBOARD_URL", "").strip()
+    if url:
+        return url
+    try:
+        ip = subprocess.run(["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=10).stdout.split()[0]
+        return "http://%s:8080" % ip
+    except Exception:
+        sys.exit("❌ หา IP Tailscale ไม่เจอ: ตั้ง DASHBOARD_URL ใน /root/bot.env แล้วรันใหม่")
+
+
 def main():
     token = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
     if not token:
@@ -38,9 +51,12 @@ def main():
     for m in call("GET", API + "/richmenu/list", token).get("richmenus", []):
         if m.get("name") == NAME:
             call("DELETE", API + "/richmenu/" + m["richMenuId"], token)
-    cw, ch = W // 3, H // 2
+    url = dashboard_url()
+    cw, ch = W // 3, 620  # 6 ปุ่มบน 2 แถว + แถบเปิดแดชบอร์ดด้านล่าง (ต้องตรงกับรูป richmenu.png)
     areas = [{"bounds": {"x": (i % 3) * cw, "y": (i // 3) * ch, "width": cw, "height": ch},
               "action": {"type": "message", "text": t}} for i, t in enumerate(BUTTONS)]
+    areas.append({"bounds": {"x": 0, "y": 2 * ch, "width": W, "height": H - 2 * ch},
+                  "action": {"type": "uri", "label": "แดชบอร์ด", "uri": url}})
     menu = {"size": {"width": W, "height": H}, "selected": True, "name": NAME,
             "chatBarText": "เมนูบอทเทรด", "areas": areas}
     rid = call("POST", API + "/richmenu", token, menu)["richMenuId"]
@@ -48,6 +64,7 @@ def main():
         call("POST", DATA_API + "/richmenu/%s/content" % rid, token, f.read(), "image/png")
     call("POST", API + "/user/all/richmenu/" + rid, token)
     print("✅ ติดตั้งริชเมนูแล้ว ปิดแชท OA แล้วเปิดใหม่จะเห็นเมนูด้านล่าง")
+    print("   ปุ่มแดชบอร์ดเปิด: %s (ต้องเปิดแอป Tailscale ในมือถือก่อน)" % url)
 
 
 if __name__ == "__main__":

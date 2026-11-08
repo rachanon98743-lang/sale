@@ -29,6 +29,7 @@ from departments import RISK_PROFILES, now_th
 REPLY_URL = "https://api.line.me/v2/bot/message/reply"
 HELP = """📋 คำสั่งที่ใช้ได้
 • สถานะ – มูลค่าพอร์ต กำไร โหมด
+• แดชบอร์ด – ลิงก์เปิดหน้าแดชบอร์ด (เปิด Tailscale ก่อน)
 • ไม้ที่ถือ – เหรียญที่ถืออยู่ + กำไร/ขาดทุนตอนนี้
 • สรุปวันนี้ – ซื้อขายวันนี้ + ค่า AI
 • หยุด – หยุดเปิดไม้ใหม่ (ไม้เดิมยังเฝ้าอยู่)
@@ -94,6 +95,8 @@ class LineBot:
         co.log("CEO", "ได้รับคำสั่งจาก LINE: %s" % text[:80])
         if t in ("ช่วยเหลือ", "help", "เมนู", "คำสั่ง", "?"):
             return HELP
+        if t in ("แดชบอร์ด", "dashboard", "เว็บ", "ลิงก์"):
+            return self.dashboard_text()
         if t in ("สถานะ", "status", "พอร์ต", "พอร์ท"):
             return self.status_text()
         if t in ("ไม้ที่ถือ", "ถืออะไร", "ถืออยู่", "positions"):
@@ -114,6 +117,17 @@ class LineBot:
         if t.startswith("ขาย"):
             return self.ask_sell(t[3:])
         return self.ask_ai(text)
+
+    def dashboard_text(self):
+        url = os.environ.get("DASHBOARD_URL", "").strip()
+        if not url:
+            try:
+                import subprocess
+                ip = subprocess.run(["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=10).stdout.split()[0]
+                url = "http://%s:8080" % ip
+            except Exception:
+                return "หาลิงก์แดชบอร์ดไม่เจอ: ตั้ง DASHBOARD_URL ใน /root/bot.env"
+        return "📊 แดชบอร์ด\n%s\n\nเปิดแอป Tailscale ในมือถือก่อน แล้วค่อยกดลิงก์" % url
 
     def status_text(self):
         co = self.co
