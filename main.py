@@ -59,7 +59,7 @@ class Company:
         self.strategy = StrategyDept(self.log, self.acct, cfg)
         self.ai = AIAnalystDept(cfg, self.acct, self.log)
         self.riskd = RiskDept(cfg, self.acct, self.log)
-        self.exe = ExecutionDept(self.ex, self.acct, self.log)
+        self.exe = ExecutionDept(self.ex, self.acct, self.log, cfg)
         self.regime = "neutral"
         self.last_scan = 0
         self.last_research = []
@@ -183,7 +183,7 @@ class Company:
                         self.exe.sell(p, "ขายตามคำสั่ง LINE")
                     except Exception as e:
                         self.log("ฝ่ายเทรด", "ขาย %s ตามคำสั่ง LINE ไม่สำเร็จ: %s" % (sym, e), line=True)
-        self.exe.monitor()
+        self.exe.monitor()  # เฝ้าซ้ำในลูปหลักด้วย (ปกติ thread เฝ้าราคาทำทุก 10 วินาทีอยู่แล้ว)
         eq = self.equity()
         self.acct.record_equity(eq)
         self.heartbeat()
@@ -313,6 +313,23 @@ class Company:
                 pass
         threading.Thread(target=go, daemon=True).start()
 
+    def monitor_loop(self):
+        """เฝ้าไม้ที่ถือทุก 10 วินาที แยกจากการสแกนตลาด: ระหว่างสแกนหลายร้อยเหรียญ (นานหลายนาที)
+        ราคาถึง stop / เป้า / ล็อกกำไร ก็ขายได้ทันที"""
+        every = max(3, int(self.cfg.get("monitor_seconds", 10)))
+        while True:
+            time.sleep(every)
+            if self.status != "running":
+                continue
+            try:
+                self.exe.monitor()
+                self.save_paper()
+            except Exception as e:
+                now = time.time()
+                if now - getattr(self, "_mon_err", 0) > 600:
+                    self._mon_err = now
+                    self.log("ฝ่ายเทรด", "เฝ้าราคาไม่สำเร็จ (จะลองใหม่): %s" % e)
+
     def keep_thread(self, name, target, *args):
         """เปิด thread งานเสริม (แดชบอร์ด, LINE) และจำไว้ ถ้าตายจะถูกเปิดใหม่โดย watchdog"""
         def start():
@@ -348,6 +365,7 @@ class Company:
         self.last_ok = time.time()
         self.check_downtime()
         self.heartbeat()
+        self.keep_thread("เฝ้าราคา", self.monitor_loop)
         threading.Thread(target=self.watchdog, daemon=True).start()
         fails = 0
         while True:

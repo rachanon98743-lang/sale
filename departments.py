@@ -600,10 +600,43 @@ class RiskDept:
 class ExecutionDept:
     name = "ฝ่ายเทรด"
 
-    def __init__(self, ex, acct, log):
+    def __init__(self, ex, acct, log, cfg=None):
         self.ex, self.acct, self.log = ex, acct, log
+        self.cfg = cfg or {}
+        self.lock = threading.RLock()  # เฝ้าราคา (ทุก 10 วิ) กับซื้อ/ขายในลูปหลัก ห้ามทำพร้อมกัน
+
+    def trail(self, p, px):
+        """ล็อกกำไร (trailing stop) สำหรับไม้ที่บอทเฝ้าเอง:
+        - กำไรถึง 1 เท่าของระยะ stop → ย้าย stop ขึ้นมาที่ทุน (ไม่ขาดทุนแล้ว)
+        - กำไรถึง 1.5 เท่า → stop ไล่ตามราคาสูงสุด ห่างลงมา 75% ของระยะ stop เดิม
+        คืน stop ใหม่ (หรือ None ถ้าไม่เปลี่ยน)"""
+        if not self.cfg.get("trailing_stop", True) or p["oco_id"]:
+            return None
+        m = p.get("meta_d") or {}
+        r = m.get("sl_pct") or (1 - p["sl"] / p["entry"] if p["sl"] < p["entry"] else None)
+        if not r or r <= 0:
+            return None
+        peak = max(m.get("peak", p["entry"]), px)
+        new = p["sl"]
+        if peak >= p["entry"] * (1 + r):
+            new = max(new, p["entry"] * (1 + 2.5 * self.ex.fee))
+        if peak >= p["entry"] * (1 + 1.5 * r):
+            new = max(new, peak * (1 - 0.75 * r))
+        changed_peak = peak > m.get("peak", 0) * 1.001
+        if new > p["sl"] * 1.002 or changed_peak:
+            m.update(peak=peak, sl_pct=r)
+            self.acct.update_stop(p["id"], max(new, p["sl"]), m)
+        if new > p["sl"] * 1.002:
+            self.log(self.name, "🔒 ล็อกกำไร %s: ย้าย stop %.6g → %.6g (ราคาสูงสุด %.6g, ล็อกไว้ %+.1f%%)" % (
+                p["symbol"], p["sl"], new, peak, (new / p["entry"] - 1) * 100))
+            return new
+        return None
 
     def buy(self, o, risk):
+        with self.lock:
+            return self._buy(o, risk)
+
+    def _buy(self, o, risk):
         s = o["symbol"]
         qty, px, oid, spent = self.ex.market_buy(s, o["usdt"])
         if qty <= 0:
@@ -616,6 +649,7 @@ class ExecutionDept:
             self.log(self.name, "ตั้ง OCO บนกระดานไม่สำเร็จ (%s) จะเฝ้าราคาเองแทน" % e)
         bt = o.get("bt") or {}
         meta = {"features": o.get("features") or {}, "p_win": bt.get("p_win"), "ev": bt.get("ev"),
+                "sl_pct": o["sl_pct"], "peak": px,
                 "bt_trades": bt.get("trades"), "ai_reason": o.get("ai_reason", ""), "score": o.get("score")}
         pid = self.acct.open_position(s, qty, px, spent, sl, tp, oco, risk, "; ".join(o["why"]), meta)
         fc = ""
@@ -628,6 +662,10 @@ class ExecutionDept:
         return pid
 
     def monitor(self):
+        with self.lock:
+            self._monitor()
+
+    def _monitor(self):
         pos = self.acct.open_positions()
         if not pos:
             return
@@ -646,11 +684,23 @@ class ExecutionDept:
                 continue
             if px is None:
                 continue
-            reason = "ตัดขาดทุน" if px <= p["sl"] else "ทำกำไร" if px >= p["tp"] else None
+            new = self.trail(p, px)
+            if new:
+                p["sl"] = new
+            if px <= p["sl"]:
+                reason = "ล็อกกำไร" if p["sl"] > p["entry"] else "ตัดขาดทุน"
+            else:
+                reason = "ทำกำไร" if px >= p["tp"] else None
             if reason:
                 self.sell(p, reason)
 
     def sell(self, p, reason):
+        with self.lock:
+            if not self.acct._one("SELECT 1 FROM positions WHERE id=? AND status='open'", (p["id"],)):
+                return  # อีก thread ขายไปแล้ว
+            self._sell(p, reason)
+
+    def _sell(self, p, reason):
         if p["oco_id"]:
             try:
                 self.ex.cancel_oco(p["symbol"], p["oco_id"])
@@ -742,6 +792,9 @@ class AccountingDept:
         self._x("UPDATE positions SET status='closed', exit=?, proceeds=?, pnl=?, reason=?, closed=? WHERE id=?",
                 (exit_px, proceeds, proceeds - row["cost"], reason, now_th().isoformat(), pid))
         self.log(self.name, "ลงบัญชีปิดไม้ %s: %s กำไร/ขาดทุน %+.2f" % (row["symbol"], reason, proceeds - row["cost"]))
+
+    def update_stop(self, pid, sl, meta):
+        self._x("UPDATE positions SET sl=?, meta=? WHERE id=?", (sl, json.dumps(meta, ensure_ascii=False), pid))
 
     def open_positions(self):
         return [self._pos(r) for r in self._q("SELECT * FROM positions WHERE status='open'")]
