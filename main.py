@@ -42,8 +42,10 @@ class Company:
             sys.exit("risk ต้องเป็น low / mid / high")
         self.exchange = cfg.get("exchange", "binance")
         tag = self.mode if self.exchange == "binance" else "%s_%s" % (self.exchange, self.mode)
+        if self.exchange == "binance_th" and (cfg.get("quote") or "THB") != "THB":
+            tag += "_" + cfg["quote"].lower()  # แยกบัญชีคู่ USDT ออกจากคู่บาท
         self.acct = AccountingDept(os.path.join(HERE, "company_%s.db" % tag))
-        th = self.exchange == "binance_th"
+        th = self.exchange == "binance_th" and (cfg.get("quote") or "THB") == "THB"  # เงินจำลองหน่วยบาท
         self.ex = Binance(self.mode, os.environ.get("BINANCE_API_KEY", ""), os.environ.get("BINANCE_API_SECRET", ""),
                           fee=cfg.get("fee", 0.001), exchange=self.exchange, quote=cfg.get("quote"),
                           paper_balance=cfg.get("paper_balance_th", 30000) if th else cfg.get("paper_balance", 1000))

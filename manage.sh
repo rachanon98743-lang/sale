@@ -30,6 +30,7 @@ while true; do
   echo "12) ส่งข้อความทดสอบเข้า LINE"
   echo "13) เปิดสั่งงานผ่านแชท LINE + ติดตั้งริชเมนู"
   echo "14) ดูคู่เหรียญทั้งหมดที่กระดานเปิดให้บอทเทรด"
+  echo "15) Binance TH: เลือกเทรดคู่ THB (~11 เหรียญ) หรือคู่ USDT (~380 เหรียญ)"
   echo " 0) ออก"
   read -r -p "เลือก: " c
   case "$c" in
@@ -83,6 +84,7 @@ PY
 import json,sys
 p,e=sys.argv[1],sys.argv[2]
 c=json.load(open(p,encoding="utf-8")); c["exchange"]=e
+if e=="binance": c.pop("quote",None)
 json.dump(c,open(p,"w",encoding="utf-8"),ensure_ascii=False,indent=2)
 PY
          [ "$e" = binance_th ] && [ "$(mode)" = testnet ] && sed -i "s/--mode [a-z]*/--mode paper/" "$SVC" && systemctl daemon-reload
@@ -97,6 +99,17 @@ PY
         systemctl restart tradingbot; echo "บันทึกแล้ว และรีสตาร์ทบอทแล้ว" ;;
     12) ( set -a; . "$ENV"; set +a; cd "$DIR" && python3 main.py --test-line ) ;;
     14) ( cd "$DIR" && python3 main.py --markets ) ;;
+    15) read -r -p "สกุลเงินที่ใช้เทรด (THB/USDT): " q
+        case "$q" in THB|USDT)
+          [ "$(mode)" = live ] && echo "⚠️ โหมดเงินจริง: เพดานทุน (max_capital_usdt) จะนับเป็น $q และต้องมีเงิน $q ในบัญชี Binance TH"
+          python3 - "$DIR/config.json" "$q" <<'PY2'
+import json,sys
+p,q=sys.argv[1],sys.argv[2]
+c=json.load(open(p,encoding="utf-8")); c["quote"]=q
+json.dump(c,open(p,"w",encoding="utf-8"),ensure_ascii=False,indent=2)
+PY2
+          systemctl restart tradingbot; echo "เปลี่ยนเป็นคู่ $q แล้ว" ;;
+        *) echo "ไม่ถูกต้อง" ;; esac ;;
     13) grep -q '^LINE_CHANNEL_ACCESS_TOKEN=' "$ENV" || { echo "ต้องทำข้อ 11 (ตั้ง LINE) ก่อน"; continue; }
         echo "Channel secret อยู่ที่ developers.line.biz → channel → Basic settings"
         read -r -p "Channel secret: " sec
