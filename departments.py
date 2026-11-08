@@ -74,6 +74,11 @@ def now_th():
     return datetime.now(TH)
 
 
+def th_hm(ts):
+    """เวลาไทย HH:MM จาก timestamp (VPS มักตั้งเวลาเป็น UTC ห้ามใช้ time.localtime)"""
+    return datetime.fromtimestamp(ts, TH).strftime("%H:%M")
+
+
 # ===================================================================== indicators
 def sma(a, n):
     out, s = [None] * len(a), 0.0

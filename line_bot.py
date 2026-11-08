@@ -26,7 +26,7 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from departments import RISK_PROFILES, now_th
+from departments import RISK_PROFILES, now_th, th_hm
 
 REPLY_URL = "https://api.line.me/v2/bot/message/reply"
 API = "https://api.line.me/v2/bot"
@@ -233,12 +233,48 @@ class LineBot:
             f["expected"], q, f["best"], f["worst"]))
         return "\n".join(out)
 
+    def health_text(self):
+        """สถานะระบบ: บอทออนไลน์ไหม แต่ละส่วนทำงานไหม"""
+        co = self.co
+        from departments import RISK_PROFILES as RP
+
+        def dur(sec):
+            sec = int(sec)
+            if sec < 60:
+                return "%d วินาที" % sec
+            if sec < 3600:
+                return "%d นาที" % (sec // 60)
+            if sec < 86400:
+                return "%d ชม. %d นาที" % (sec // 3600, sec % 3600 // 60)
+            return "%d วัน %d ชม." % (sec // 86400, sec % 86400 // 3600)
+        loop_age = time.time() - co.last_ok
+        ok = loop_age < 300
+        lines = ["%s ระบบ%s · เปิดต่อเนื่อง %s" % ("🟢" if ok else "🔴", "ออนไลน์" if ok else "ค้าง/มีปัญหา",
+                                                dur(time.time() - co.started_at))]
+        lines.append("• ลูปหลัก: ทำงานล่าสุด %sที่แล้ว" % dur(loop_age))
+        if co.last_scan:
+            nxt = co.last_scan + RP[co.risk]["every_min"] * 60
+            lines.append("• สแกนตลาดล่าสุด %s · รอบถัดไป ~%s" % (
+                th_hm(co.last_scan), th_hm(nxt)))
+        else:
+            lines.append("• สแกนตลาด: กำลังเริ่มรอบแรก")
+        alive = {n: t.is_alive() for n, (t, _) in co.threads.items()}
+        lines.append("• " + " · ".join("%s %s" % (n, "✅" if a else "❌") for n, a in alive.items()))
+        lines.append("• AI: %s" % ("✅ " + co.ai.model.split("-")[1].title() if co.ai.enabled else "ปิดอยู่"))
+        lines.append("• แจ้งเตือนเมื่อ VPS ดับ: %s" % ("✅ ตั้งแล้ว" if os.environ.get("HEALTHCHECK_URL") else "ยังไม่ตั้ง (manage.sh ข้อ 18)"))
+        if co.downtime_note:
+            lines.append("• ⚠️ ครั้งล่าสุด: " + co.downtime_note)
+        return "\n".join(lines)
+
     def status_text(self):
+        return self.health_text() + "\n\n" + self.port_text()
+
+    def port_text(self):
         co = self.co
         s = co.acct.summary()
         eq = co.equity_cached()
         q = co.ex.quote
-        return ("📊 สถานะ\nกระดาน: %s · %s\nความเสี่ยง: %s · ตลาด: %s\nมูลค่าพอร์ต: %.2f %s\nเงินสด: %.2f %s\n"
+        return ("📊 พอร์ต\nกระดาน: %s · %s\nความเสี่ยง: %s · ตลาด: %s\nมูลค่าพอร์ต: %.2f %s\nเงินสด: %.2f %s\n"
                 "กำไรที่ปิดแล้ว: %+.2f\nชนะ %d/%d ไม้ (%.0f%%) · ถืออยู่ %d ไม้%s") % (
             "Binance TH" if co.ex.th else "Binance.com", {"live": "เงินจริง", "paper": "เงินจำลอง"}.get(co.mode, co.mode),
             RISK_PROFILES[co.risk]["name"], co.regime, eq, q, co.ex.usdt_free(), q, s["realized_pnl"],
@@ -307,7 +343,7 @@ class LineBot:
             return "🧠 วันนี้/เดือนนี้ใช้งบ AI ครบเพดานแล้ว ปรับได้ในแดชบอร์ด\n\n" + HELP
         logs = self.co.acct.recent_logs(25)
         ctx = "%s\n\n%s\n\nบันทึกล่าสุด:\n%s" % (
-            self.status_text(), self.positions_text(),
+            self.port_text(), self.positions_text(),
             "\n".join("%s %s: %s" % (l["t"][11:16], l["dept"], l["msg"]) for l in reversed(logs)))
         prompt = ("คุณคือผู้ช่วยของบอทเทรดคริปโตอัตโนมัติ ตอบเจ้าของผ่าน LINE เป็นภาษาไทย สั้น กระชับ อ่านง่ายบนมือถือ "
                   "ใช้ข้อมูลจริงด้านล่างเท่านั้น ห้ามรับประกันกำไร ห้ามแนะนำเพิ่มความเสี่ยงหรือใช้เลเวอเรจ "
@@ -412,7 +448,7 @@ def doctor(bot, fix=True):
             out.append((True, "LINE ทดสอบส่งเข้าบอทสำเร็จ"))
         elif recent:  # ปุ่มทดสอบของ LINE บางครั้งต่อ HTTPS ของ Funnel ไม่ติด แต่ข้อความจริงเข้าได้ ไม่ต้องเตือน
             out.append((True, "ข้อความจริงจากแชทเข้าบอทได้ปกติ (ล่าสุด %s) ปุ่มทดสอบของ LINE ไม่ผ่านไม่เป็นไร" %
-                        time.strftime("%H:%M", time.localtime(bot.last_webhook))))
+                        th_hm(bot.last_webhook)))
         else:
             out.append((False, "LINE ส่งเข้าบอทไม่ได้: %s %s %s (ลองกดปุ่มในแชท ถ้าบอทตอบ = ใช้ได้)" % (
                 t.get("statusCode", ""), t.get("reason", ""), t.get("detail", ""))))
@@ -466,6 +502,19 @@ def status_bar_loop(bot, every_min):
                 wait = min(wait * 2, 3600)
             bot.co.log("CEO", "อัปเดตแถบสถานะริชเมนูไม่ได้: %s" % e)
         time.sleep(wait)
+
+
+def reset_bar(bot):
+    """ปิดแถบสถานะแล้ว: คืนข้อความใต้แชทเป็น 'เมนูบอทเทรด' (ทำครั้งเดียว ถ้ายังเป็นข้อความสถานะเก่าค้างอยู่)"""
+    import richmenu
+    time.sleep(30)
+    try:
+        menus = richmenu.call("GET", richmenu.API + "/richmenu/list", bot.token).get("richmenus", [])
+        if any(m.get("name") == richmenu.NAME and m.get("chatBarText") != "เมนูบอทเทรด" for m in menus):
+            richmenu.set_bar(bot.token, "เมนูบอทเทรด")
+            bot.co.log("CEO", "คืนแถบใต้แชท LINE เป็น 'เมนูบอทเทรด' แล้ว")
+    except BaseException as e:
+        bot.co.log("CEO", "คืนแถบใต้แชท LINE ไม่ได้: %s" % e)
 
 
 def serve(company, port=8090):
@@ -527,9 +576,11 @@ def serve(company, port=8090):
     srv = ThreadingHTTPServer(("127.0.0.1", port), H)
     company.keep_thread("รับคำสั่ง LINE", srv.serve_forever)
     threading.Thread(target=doctor_loop, args=(bot,), daemon=True).start()
-    every = max(1, int(company.cfg.get("line_status_bar_min", 5))) if company.cfg.get("line_status_bar_min", 5) else 0
+    every = int(company.cfg.get("line_status_bar_min", 0) or 0)
     if every > 0:
-        threading.Thread(target=status_bar_loop, args=(bot, every), daemon=True).start()
+        threading.Thread(target=status_bar_loop, args=(bot, max(1, every)), daemon=True).start()
+    else:
+        threading.Thread(target=reset_bar, args=(bot,), daemon=True).start()
     return bot
 
 

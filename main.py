@@ -22,7 +22,7 @@ import traceback
 
 from binance_client import Binance, BinanceError
 from departments import (RISK_PROFILES, AccountingDept, AIAnalystDept, ExecutionDept, ResearchDept,
-                         RiskDept, StrategyDept, liquidity_check, now_th)
+                         RiskDept, StrategyDept, liquidity_check, now_th, th_hm)
 import dashboard
 from notifier import LineNotifier
 import line_bot
@@ -289,7 +289,7 @@ class Company:
         if gap < 180 and hb.get("clean"):
             return
         if gap >= 180 or not hb.get("clean"):
-            since = time.strftime("%H:%M", time.localtime(hb["t"]))
+            since = th_hm(hb["t"])
             mins = int(gap // 60)
             self.downtime_note = "บอทหยุดทำงานไป %d นาที (ตั้งแต่ %s)%s" % (
                 mins, since, "" if hb.get("clean") else " โดยไม่ได้สั่งปิด")
