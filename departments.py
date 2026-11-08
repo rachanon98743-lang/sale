@@ -28,7 +28,7 @@ RISK_PROFILES = {
 }
 # Binance TH: วอลุ่มซื้อขายขั้นต่ำต่อวัน (ล้านบาท) เหรียญที่ต่ำกว่านี้ไม่สแกนเลย (แก้ได้ด้วย th_min_vol_m ใน config.json)
 TH_MIN_VOL_M = {"low": 3, "mid": 1, "high": 0.5}
-TH_USDT_MIN_VOL_M = {"low": 1, "mid": 0.2, "high": 0.05}  # Binance TH คู่ USDT (ล้าน USDT/วัน)  # Binance TH มีคู่บาทแค่ ~11 คู่ ตั้งต่ำไว้ ให้ตัวตรวจสภาพคล่องก่อนซื้อคุมแทน
+TH_USDT_MIN_VOL_M = {"low": 0.1, "mid": 0.02, "high": 0.01}  # Binance TH คู่ USDT (ล้าน USDT/วัน)  # Binance TH มีคู่บาทแค่ ~11 คู่ ตั้งต่ำไว้ ให้ตัวตรวจสภาพคล่องก่อนซื้อคุมแทน
 
 
 def liquidity_check(ex, symbol, amount, max_spread=0.005, max_slip=0.005, ticker=None):
