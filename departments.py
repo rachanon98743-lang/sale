@@ -18,14 +18,17 @@ import time
 import urllib.request
 from datetime import datetime, timezone, timedelta
 
+from ta import HTF, Chart  # ชุดเครื่องมือวิเคราะห์กราฟแบบนักเทรด
+
 TH = timezone(timedelta(hours=7))
 STABLE = {"USDT", "USDC", "FDUSD", "TUSD", "BUSD", "DAI", "USDP", "USDD", "PYUSD", "EUR", "EURI", "AEUR",
           "TRY", "BRL", "GBP", "USD1", "XUSD", "BFUSD", "RLUSD", "USDE", "WBTC", "WBETH", "BNSOL"}
 
+# risk = ยอมเสียได้กี่ % ของพอร์ตต่อไม้ (ถ้าโดนตัด) ขนาดไม้คำนวณจากระยะ stop จริง แต่ไม่เกิน size
 RISK_PROFILES = {
-    "low":  {"name": "ต่ำ",  "tf": "4h",  "min_vol_m": 150, "max_coins": 25, "size": 0.10, "sl": 0.03, "tp": 0.06, "max_pos": 3, "min_score": 70, "every_min": 30},
-    "mid":  {"name": "กลาง", "tf": "1h",  "min_vol_m": 20,  "max_coins": 50, "size": 0.15, "sl": 0.05, "tp": 0.10, "max_pos": 5, "min_score": 70, "every_min": 15},
-    "high": {"name": "สูง",  "tf": "15m", "min_vol_m": 3,   "max_coins": 80, "size": 0.20, "sl": 0.08, "tp": 0.20, "max_pos": 5, "min_score": 65, "every_min": 5},
+    "low":  {"name": "ต่ำ",  "tf": "4h",  "min_vol_m": 150, "max_coins": 25, "size": 0.10, "sl": 0.03, "tp": 0.06, "max_pos": 3, "min_score": 75, "every_min": 30, "risk": 0.005},
+    "mid":  {"name": "กลาง", "tf": "1h",  "min_vol_m": 20,  "max_coins": 50, "size": 0.15, "sl": 0.05, "tp": 0.10, "max_pos": 5, "min_score": 70, "every_min": 15, "risk": 0.01},
+    "high": {"name": "สูง",  "tf": "15m", "min_vol_m": 3,   "max_coins": 80, "size": 0.20, "sl": 0.08, "tp": 0.20, "max_pos": 5, "min_score": 60, "every_min": 5, "risk": 0.015},
 }
 # Binance TH: วอลุ่มซื้อขายขั้นต่ำต่อวัน (ล้านบาท) เหรียญที่ต่ำกว่านี้ไม่สแกนเลย (แก้ได้ด้วย th_min_vol_m ใน config.json)
 TH_MIN_VOL_M = {"low": 3, "mid": 1, "high": 0.5}  # Binance TH มีคู่บาทแค่ ~11 คู่ ตั้งต่ำไว้ ให้ตัวตรวจสภาพคล่องก่อนซื้อคุมแทน
@@ -143,10 +146,13 @@ def features_of(r, regime):
         "ext": _bucket(r.get("ext", 0), [0.01, 0.03, 0.06], ["ชิดEMA20", "1-3%", "3-6%", "6%+"]),
         "regime": regime,
         "vol": "วอลุ่มพุ่ง" if r.get("spike", 1) > 1.5 else "วอลุ่มปกติ",
+        "setup": r.get("setup", "-"),
+        "htf": r.get("htf") or "-",
     }
 
 
-FEATURE_TH = {"rsi": "RSI", "chg24": "ขึ้นใน 24 ชม.", "ext": "ห่าง EMA20", "regime": "ตลาด", "vol": "วอลุ่ม"}
+FEATURE_TH = {"rsi": "RSI", "chg24": "ขึ้นใน 24 ชม.", "ext": "ห่าง EMA20", "regime": "ตลาด", "vol": "วอลุ่ม",
+              "setup": "จังหวะ", "htf": "TF ใหญ่"}
 
 
 # ===================================================================== 1. Research
@@ -171,80 +177,41 @@ class ResearchDept:
         self.log(self.name, "ภาวะตลาด (BTC รายวัน): %s ราคา %.0f MA50 %.0f MA200 %.0f" % (regime, c[-1], m50, m200))
         return regime
 
-    @staticmethod
-    def _score_at(i, risk, c, h, v, e20, e50, s200, r_arr, atr):
-        """คะแนนสัญญาณ ณ แท่งที่ i (ใช้ทั้งตอนสแกนจริงและตอนทดสอบย้อนหลัง ให้กฎตรงกัน)"""
-        p = c[i]
-        r = r_arr[i] or 50
-        mom = c[i] / c[max(0, i - 10)] - 1
-        vol_avg = sum(v[i - 20:i]) / 20 or 1
-        spike = v[i] / vol_avg
-        hi20 = max(h[i - 20:i])
-        trend_up = e20[i] is not None and e50[i] is not None and p > e20[i] > e50[i]
-        ext = p / e20[i] - 1 if e20[i] else 0
-        score, why = 0, []
-        if risk == "low":
-            if s200[i] and p > s200[i]: score += 30; why.append("เหนือ MA200")
-            if trend_up: score += 30; why.append("EMA20>EMA50")
-            if 40 <= r <= 65: score += 25; why.append("RSI %.0f ไม่ร้อนเกิน" % r)
-            elif r > 75: score -= 20
-            if mom > 0: score += 15
-        elif risk == "mid":
-            if trend_up: score += 35; why.append("แนวโน้มขึ้น")
-            if 50 <= r <= 70: score += 25; why.append("RSI %.0f แข็งแรง" % r)
-            elif r > 78: score -= 20
-            if mom > 0.02: score += 25; why.append("โมเมนตัม +%.1f%%" % (mom * 100))
-            elif mom > 0: score += 10
-            if spike > 1.3: score += 15; why.append("วอลุ่ม x%.1f" % spike)
-        else:
-            if p > hi20: score += 40; why.append("ทะลุจุดสูง 20 แท่ง")
-            if spike > 2: score += 30; why.append("วอลุ่ม x%.1f" % spike)
-            elif spike > 1.4: score += 15
-            if trend_up: score += 20
-            if r < 85: score += 10
-            else: score -= 25
-        # กฎนักเทรดมืออาชีพ: ไม่ไล่ราคาที่วิ่งห่างเส้นค่าเฉลี่ยเกิน 3 เท่าของความผันผวน (เสี่ยงซื้อยอดดอย)
-        if atr > 0 and ext > max(0.03, atr * 3):
-            score -= 15
-            why.append("ห่าง EMA20 %.1f%% (เสี่ยงไล่ราคา)" % (ext * 100))
-        return max(0, min(100, score)), why, {"rsi": r, "mom": mom, "spike": spike, "trend_up": trend_up, "ext": ext}
+    def analyze(self, k, risk, htf_k=None, btc_k=None):
+        """วิเคราะห์แบบนักเทรด (ta.Chart) ณ แท่งล่าสุด + ทดสอบย้อนหลังด้วยกฎเดียวกันบนกราฟนี้"""
+        cfg = RISK_PROFILES[risk]
+        ch = Chart(k, htf_k, btc_k)
+        n = len(ch.c) - 1
+        ev = ch.evaluate(n, max_sl=cfg["sl"] * 2)
+        if ev is None:
+            raise ValueError("ข้อมูลกราฟไม่พอ")
+        why = ["[%s]" % ev["setup"]] + [t for ok, t in ev["checklist"] if ok] + ["⚠️" + w for w in ev["warn"]]
+        out = dict(ev, price=ch.c[n], why=why, trend_up=ev["structure"] == "up",
+                   mom=ch.c[n] / ch.c[max(0, n - 10)] - 1, bt=self.backtest(ch, risk))
+        return out
 
-    def analyze(self, k, risk):
-        c = [float(x[4]) for x in k]
-        h = [float(x[2]) for x in k]
-        lo = [float(x[3]) for x in k]
-        v = [float(x[5]) for x in k]
-        n = len(c) - 1
-        e20, e50 = ema(c, 20), ema(c, 50)
-        s200 = sma(c, min(200, n))
-        r_arr = rsi(c)
-        atr = atr_pct(h, lo, c)
-        score, why, f = self._score_at(n, risk, c, h, v, e20, e50, s200, r_arr, atr)
-        bt = self.backtest(risk, c, h, lo, v, e20, e50, s200, r_arr, atr)
-        return {"price": c[n], "rsi": f["rsi"], "trend_up": f["trend_up"], "mom": f["mom"], "atr": atr,
-                "ext": f["ext"], "spike": f["spike"], "score": score, "why": why, "bt": bt}
-
-    def backtest(self, risk, c, h, lo, v, e20, e50, s200, r_arr, atr):
-        """ทดสอบย้อนหลังบนกราฟของเหรียญนี้เอง: ทุกครั้งที่สัญญาณแบบเดียวกันเกิด แล้วซื้อตามกฎ SL/TP เดียวกัน
+    def backtest(self, ch, risk):
+        """ทดสอบย้อนหลังบนกราฟของเหรียญนี้เอง: ทุกแท่งที่เช็กลิสต์ผ่านเกณฑ์ ซื้อแล้วถือตาม stop/เป้าของแท่งนั้น
         ผลเป็นอย่างไร (ไม่นับไม้ซ้อนกัน) ใช้ประเมินโอกาสชนะและกำไรคาดหวังของสัญญาณตอนนี้"""
         cfg = RISK_PROFILES[risk]
-        sl, tp = exit_levels(cfg, atr)
         fee = float(self.cfg.get("fee", 0.001))
         horizon = int(self.cfg.get("backtest_horizon_bars", 48))
+        c, h, lo = ch.c, ch.h, ch.l
         n = len(c) - 1
         wins = losses = timeouts = 0
-        rets = []
+        rets, sl_sum, tp_sum = [], 0.0, 0.0
         i = 60
         while i < n - 1:
-            sc = self._score_at(i, risk, c, h, v, e20, e50, s200, r_arr, atr)[0]
-            if sc < cfg["min_score"]:
+            ev = ch.evaluate(i, max_sl=cfg["sl"] * 2)
+            if not ev or ev["score"] < cfg["min_score"]:
                 i += 1
                 continue
+            sl, tp = ev["sl_pct"], ev["tp_pct"]
             entry = c[i]
             stop, target = entry * (1 - sl), entry * (1 + tp)
             ret, j = None, i + 1
             while j <= min(n, i + horizon):
-                if lo[j] <= stop:  # ถ้าแท่งเดียวโดนทั้งคู่ นับว่าโดน SL ก่อน (มองแง่ร้ายไว้ก่อน)
+                if lo[j] <= stop:  # แท่งเดียวโดนทั้งคู่ นับว่าโดน SL ก่อน (มองแง่ร้ายไว้ก่อน)
                     ret = -sl; losses += 1
                     break
                 if h[j] >= target:
@@ -252,18 +219,21 @@ class ResearchDept:
                     break
                 j += 1
             if ret is None:
-                if j - 1 >= n and n - i < horizon:
+                if n - i < horizon:
                     break  # ยังไม่จบ (ข้อมูลไม่พอ) ไม่นับ
-                ret = c[min(n, i + horizon)] / entry - 1; timeouts += 1
+                ret = c[i + horizon] / entry - 1; timeouts += 1
             rets.append(ret - 2 * fee)
+            sl_sum += sl; tp_sum += tp
             i = j + 1
         trades = len(rets)
-        k = 4  # หดผลเข้าหาค่ากลาง (ขาดทุนเท่าค่าธรรมเนียม) เมื่อจำนวนตัวอย่างน้อย กันการมั่นใจเกินจริง
+        k = 4  # หดผลเข้าหาค่ากลาง (ขาดทุนเท่าค่าธรรมเนียม) เมื่อตัวอย่างน้อย กันการมั่นใจเกินจริง
         ev = (sum(rets) - k * 2 * fee) / (trades + k)
-        prior = sl / (sl + tp)
+        sl_avg = sl_sum / trades if trades else cfg["sl"]
+        tp_avg = tp_sum / trades if trades else cfg["tp"]
+        prior = sl_avg / (sl_avg + tp_avg)
         p_win = (wins + k * prior) / (trades + k)
         return {"trades": trades, "wins": wins, "losses": losses, "timeouts": timeouts,
-                "p_win": round(p_win, 3), "ev": round(ev, 4), "sl": sl, "tp": tp}
+                "p_win": round(p_win, 3), "ev": round(ev, 4)}
 
     def scan(self, risk):
         cfg = RISK_PROFILES[risk]
@@ -312,12 +282,21 @@ class ResearchDept:
             self.log(self.name, "ตัดทิ้ง: วอลุ่มต่ำกว่า %g ล้าน%s %d เหรียญ, spread กว้างเกิน %.2f%% %d เหรียญ" % (
                 min_vol, "บาท" if th else " " + self.ex.quote, low_vol, max_spread * 100, wide))
         results = []
+        btc_k = None
+        try:  # เทียบความแข็งแรงกับ BTC ใน timeframe เดียวกัน
+            btc_k = self.ex.klines("BTC" + self.ex.quote, cfg["tf"], 250)
+        except Exception:
+            pass
         for vol_m, s, chg in cands:
             try:
                 k = self.ex.klines(s, cfg["tf"], 250)
                 if len(k) < 60:
                     continue
-                a = self.analyze(k, risk)
+                try:
+                    htf_k = self.ex.klines(s, HTF.get(cfg["tf"], "1d"), 120)
+                except Exception:
+                    htf_k = None
+                a = self.analyze(k, risk, htf_k, btc_k)
                 a.update(symbol=s, vol_m=vol_m, chg24=chg)
                 results.append(a)
             except Exception as e:
@@ -325,8 +304,8 @@ class ResearchDept:
             time.sleep(0.1)
         results.sort(key=lambda x: -x["score"])
         good = [r for r in results if r["score"] >= cfg["min_score"]]
-        self.log(self.name, "สแกน %d เหรียญ ผ่านเกณฑ์ %d: %s" % (
-            len(results), len(good), ", ".join("%s(%d)" % (r["symbol"], r["score"]) for r in good[:8]) or "-"))
+        self.log(self.name, "สแกน %d เหรียญ ผ่านเช็กลิสต์ %d: %s" % (
+            len(results), len(good), ", ".join("%s(%d %s)" % (r["symbol"], r["score"], r["setup"]) for r in good[:8]) or "-"))
         return results
 
 
@@ -388,11 +367,15 @@ class StrategyDept:
                 self.reject(r["symbol"], "ทดสอบย้อนหลังสัญญาณนี้ %d ครั้ง ชนะ %d ได้เฉลี่ย %+.2f%%/ไม้ (ไม่คุ้ม)" % (
                     bt["trades"], bt["wins"], bt["ev"] * 100))
                 continue
-            sl, tp = exit_levels(cfg, r["atr"])
+            sl, tp = r.get("sl_pct") or exit_levels(cfg, r["atr"])[0], r.get("tp_pct") or exit_levels(cfg, r["atr"])[1]
             why = list(r["why"]) + (["เรียนรู้ %+.0f" % adj] if adj else [])
             out.append({"symbol": r["symbol"], "price": r["price"], "score": round(score), "why": why,
                         "sl_pct": sl, "tp_pct": tp, "rsi": r["rsi"], "mom": r["mom"], "chg24": r["chg24"],
-                        "ext": r.get("ext", 0), "bt": bt, "features": feats, "learn_notes": notes})
+                        "ext": r.get("ext", 0), "bt": bt, "features": feats, "learn_notes": notes,
+                        "setup": r.get("setup"), "htf": r.get("htf"), "structure": r.get("structure"),
+                        "adx": r.get("adx"), "rs_btc": r.get("rs"), "support": r.get("support"),
+                        "resistance": r.get("resistance"), "warn": r.get("warn", []),
+                        "checks": "%d/%d" % (sum(1 for ok, _ in r.get("checklist", []) if ok), len(r.get("checklist", [])))})
         if out:
             self.log(self.name, "เสนอซื้อ %d ตัว: %s" % (len(out), ", ".join(
                 "%s(ย้อนหลังชนะ %.0f%% คาด %+.1f%%)" % (p["symbol"], p["bt"].get("p_win", 0) * 100, p["bt"].get("ev", 0) * 100)
@@ -481,13 +464,16 @@ class AIAnalystDept:
         if over:
             self.log(self.name, "ถึงเพดาน (%s) หยุดเรียก AI อนุมัติตามกฎอย่างเดียว" % ", ".join(over))
             return proposals
-        keys = ("symbol", "price", "score", "why", "sl_pct", "tp_pct", "rsi", "mom", "chg24", "ext", "bt")
+        keys = ("symbol", "price", "score", "setup", "why", "sl_pct", "tp_pct", "rsi", "mom", "chg24", "ext", "htf",
+                "structure", "adx", "rs_btc", "support", "resistance", "warn", "bt")
         brief = [{k: (round(p[k], 4) if isinstance(p[k], float) else p[k]) for k in keys if k in p} for p in proposals[:8]]
         prompt = (
             "คุณเป็นผู้จัดการความเสี่ยงของกองทุนคริปโต ประสบการณ์เทรด spot มา 15 ปี\n%s\n\n"
             "ภาวะตลาดรวมตอนนี้ (BTC รายวัน): %s\nสถิติผลเทรดจริงของบอท: %s\n"
             "ข้อเสนอซื้อจากระบบ (score 0-100, sl_pct/tp_pct เป็นสัดส่วน, mom = โมเมนตัม 10 แท่ง, chg24 = %% เปลี่ยน 24 ชม., "
-            "ext = ระยะห่างจาก EMA20, bt = ผลทดสอบย้อนหลังสัญญาณเดียวกันบนเหรียญนี้: p_win โอกาสชนะ, ev กำไรคาดหวังต่อไม้):\n%s\n\n"
+            "ext = ระยะห่างจาก EMA20, htf = แนวโน้ม timeframe ใหญ่, structure = โครงสร้างยอด-ฐาน, rs_btc = แข็งกว่า BTC, "
+            "support/resistance = แนวรับ/ต้านใกล้สุด, why = เช็กลิสต์ที่ผ่าน, warn = จุดอันตราย, "
+            "bt = ผลทดสอบย้อนหลังสัญญาณเดียวกันบนเหรียญนี้: p_win โอกาสชนะ, ev กำไรคาดหวังต่อไม้):\n%s\n\n"
             "ตัดสินทีละตัว เหตุผลภาษาไทยสั้นๆ อ่านง่าย (ไม่เกิน 25 คำ) อ้างตัวเลขที่ใช้ตัดสิน\n"
             "ตอบเป็น JSON อย่างเดียว รูปแบบ: {\"decisions\":[{\"symbol\":\"XXXUSDT\",\"approve\":true,\"reason\":\"...\"}]}"
         ) % (self.PLAYBOOK, regime, json.dumps(track or {}, ensure_ascii=False), json.dumps(brief, ensure_ascii=False))
@@ -566,7 +552,8 @@ class RiskDept:
             if slots <= 0:
                 full.append(p["symbol"])
                 continue
-            amt = capital * cfg["size"] * size_mult
+            # ขนาดไม้ตามความเสี่ยง: ถ้าโดนตัดจะเสียไม่เกิน risk% ของพอร์ต (stop กว้าง = ไม้เล็กลง)
+            amt = capital * min(cfg["size"], cfg.get("risk", 1) / max(p.get("sl_pct") or cfg["sl"], 1e-4)) * size_mult
             room = capital * (1 - self.reserve) - used
             amt = min(amt, room, usdt_free * 0.99)
             if amt < filters[p["symbol"]]["min_notional"] * 1.2:
@@ -656,7 +643,8 @@ class ExecutionDept:
         if bt.get("p_win") is not None:
             fc = "\n📐 คาดการณ์: โอกาสถึงเป้า ~%.0f%% · ถ้าถึงเป้า +%.2f · ถ้าโดนตัด -%.2f · คาดหวัง %+.2f (%+.1f%%)" % (
                 bt["p_win"] * 100, spent * o["tp_pct"], spent * o["sl_pct"], spent * bt.get("ev", 0), bt.get("ev", 0) * 100)
-        why = ("\n🧠 AI: " + o["ai_reason"]) if o.get("ai_reason") else ""
+        why = ("\n🎯 จังหวะ: %s · ผ่านเช็กลิสต์ %s · คะแนน %s" % (o["setup"], o.get("checks", "-"), o.get("score"))) if o.get("setup") else ""
+        why += ("\n🧠 AI: " + o["ai_reason"]) if o.get("ai_reason") else ""
         self.log(self.name, "🟢 ซื้อ %s %.6g @ %.6g ใช้ %.2f | SL %.6g TP %.6g %s%s%s" % (
             s, qty, px, spent, sl, tp, "(OCO บนกระดาน)" if oco else "(เฝ้าเอง)", fc, why), line=True)
         return pid

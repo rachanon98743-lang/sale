@@ -13,6 +13,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from departments import RISK_PROFILES, now_th
+from ta import Chart
 
 
 class QuietServer(ThreadingHTTPServer):
@@ -73,7 +74,8 @@ class Snapshot:
         usage, limits, over = co.ai.budget_status()
         st = co.line._load()
         lb = getattr(co, "line_bot", None)
-        research = [{k: r.get(k) for k in ("symbol", "price", "chg24", "rsi", "score", "why", "bt")} for r in co.last_research[:30]]
+        research = [{k: r.get(k) for k in ("symbol", "price", "chg24", "rsi", "score", "why", "bt", "setup", "checklist", "warn")}
+                    for r in co.last_research[:30]]
         return {
             "t": now_th().isoformat(timespec="seconds"),
             "mode": co.mode + (" · Binance TH" if co.ex.th else ""), "quote": co.ex.quote,
@@ -167,7 +169,7 @@ tr.click{cursor:pointer}tr.click:active{background:#21262d}
 
 <div class="card"><h3>🚫 ไม่อนุมัติล่าสุด + เหตุผล</h3><div class="sc" id="dec"></div></div>
 
-<div class="card"><h3>ผลวิจัยล่าสุด</h3><div class="sc"><table><thead><tr><th>เหรียญ</th><th>ราคา</th><th>24ชม.</th><th>RSI</th><th>คะแนน</th><th>ย้อนหลังชนะ</th><th>คาดหวัง/ไม้</th><th>เหตุผล</th></tr></thead><tbody id="res"></tbody></table></div></div>
+<div class="card"><h3>ผลวิจัยล่าสุด <span class="m" style="font-weight:400;font-size:12px">แตะเหรียญเพื่อดูกราฟ + เช็กลิสต์</span></h3><div class="sc"><table><thead><tr><th>เหรียญ</th><th>ราคา</th><th>24ชม.</th><th>RSI</th><th>คะแนน</th><th>จังหวะ</th><th>ย้อนหลังชนะ</th><th>คาดหวัง/ไม้</th></tr></thead><tbody id="res"></tbody></table></div></div>
 
 <div class="card"><h3>🧠 ฝ่ายนักวิเคราะห์ AI · งบและการใช้ token</h3>
 <div id="aiState" class="m"></div>
@@ -216,20 +218,29 @@ function line(pts,W=600,H=150){if(pts.length<2)return'<div class="m" style="font
  return `<svg viewBox="0 0 ${W} ${H+18}" preserveAspectRatio="none"><path d="${d}L${W},${H}L0,${H}Z" fill="${col}" opacity=".12"/><path d="${d}" fill="none" stroke="${col}" stroke-width="2" vector-effect="non-scaling-stroke"/>
  <text x="2" y="12" fill="#8b949e" font-size="11">${p6(mx)}</text><text x="2" y="${H-2}" fill="#8b949e" font-size="11">${p6(mn)}</text>
  <text x="0" y="${H+15}" fill="#8b949e" font-size="11">${esc(pts[0][0].slice(5).replace('T',' '))}</text><text x="${W}" y="${H+15}" fill="#8b949e" font-size="11" text-anchor="end">${esc(pts[pts.length-1][0].slice(5).replace('T',' '))}</text></svg>`;}
-function candles(k,lines,W=600,H=260){if(!k.length)return'<div class="m">ไม่มีข้อมูลกราฟ</div>';
- let mn=Math.min(...k.map(x=>x[3])),mx=Math.max(...k.map(x=>x[2]));lines.forEach(l=>{mn=Math.min(mn,l.v);mx=Math.max(mx,l.v);});
- const pad=(mx-mn)*0.05,lo=mn-pad,hi=mx+pad,Y=y=>H-(y-lo)/(hi-lo)*H,w=W/k.length;
- let s=k.map((x,i)=>{const up=x[4]>=x[1],col=up?'#3fb950':'#f85149',cx=i*w+w/2,t=Y(Math.max(x[1],x[4])),b=Y(Math.min(x[1],x[4]));
-  return `<line x1="${cx}" x2="${cx}" y1="${Y(x[2])}" y2="${Y(x[3])}" stroke="${col}"/><rect x="${i*w+w*.15}" width="${w*.7}" y="${t}" height="${Math.max(1,b-t)}" fill="${col}"/>`;}).join('');
- s+=lines.map(l=>`<line x1="0" x2="${W}" y1="${Y(l.v)}" y2="${Y(l.v)}" stroke="${l.c}" stroke-dasharray="6 4"/><text x="${W-2}" y="${Y(l.v)-3}" fill="${l.c}" font-size="12" text-anchor="end">${esc(l.n)} ${p6(l.v)}</text>`).join('');
- return `<svg viewBox="0 0 ${W} ${H}">${s}</svg>`;}
+function candles(k,lines,ov,W=600,H=340){if(!k.length)return'<div class="m">ไม่มีข้อมูลกราฟ</div>';ov=ov||{};
+ const N=k.length+11,cw=W/N;let mn=Math.min(...k.map(x=>x[3])),mx=Math.max(...k.map(x=>x[2]));
+ const cone=ov.cone||[];cone.forEach(c=>{mn=Math.min(mn,c[2]);mx=Math.max(mx,c[1]);});lines.forEach(l=>{mn=Math.min(mn,l.v);mx=Math.max(mx,l.v);});
+ const lv=[...(ov.sup||[]).map(v=>({v,c:'#3fb950',n:'แนวรับ'})),...(ov.res||[]).map(v=>({v,c:'#f85149',n:'แนวต้าน'}))].filter(x=>x.v>=mn*0.97&&x.v<=mx*1.03);
+ lv.forEach(x=>{mn=Math.min(mn,x.v);mx=Math.max(mx,x.v);});
+ const pad=(mx-mn)*0.05,lo=mn-pad,hi=mx+pad,Y=y=>H-(y-lo)/(hi-lo)*H,X=i=>i*cw+cw/2;
+ let s=lv.map(x=>`<rect x="0" width="${W}" y="${Y(x.v)-2}" height="4" fill="${x.c}" opacity=".18"/><text x="2" y="${Y(x.v)-4}" fill="${x.c}" font-size="10" opacity=".9">${x.n} ${p6(x.v)}</text>`).join('');
+ s+=k.map((x,i)=>{const up=x[4]>=x[1],col=up?'#3fb950':'#f85149',t=Y(Math.max(x[1],x[4])),b=Y(Math.min(x[1],x[4]));
+  return `<line x1="${X(i)}" x2="${X(i)}" y1="${Y(x[2])}" y2="${Y(x[3])}" stroke="${col}"/><rect x="${i*cw+cw*.15}" width="${cw*.7}" y="${t}" height="${Math.max(1,b-t)}" fill="${col}"/>`;}).join('');
+ const path=(arr,col)=>{const pts=(arr||[]).map((v,i)=>v==null?null:X(i).toFixed(1)+','+Y(v).toFixed(1)).filter(Boolean);return pts.length>1?`<polyline points="${pts.join(' ')}" fill="none" stroke="${col}" stroke-width="1.5"/>`:'';};
+ s+=path(ov.e20,'#d29922')+path(ov.e50,'#58a6ff');
+ if(cone.length){const x0=X(k.length-1),last=k[k.length-1][4];const top=cone.map(c=>X(k.length-1+c[0])+','+Y(c[1])).join(' '),bot=cone.slice().reverse().map(c=>X(k.length-1+c[0])+','+Y(c[2])).join(' ');
+  s+=`<polygon points="${x0},${Y(last)} ${top} ${bot}" fill="#a371f7" opacity=".18"/><text x="${W-2}" y="${H-4}" fill="#a371f7" font-size="10" text-anchor="end">กรอบคาดการณ์ 10 แท่ง</text>`;}
+ s+=lines.map(l=>`<line x1="0" x2="${W}" y1="${Y(l.v)}" y2="${Y(l.v)}" stroke="${l.c}" stroke-dasharray="6 4"/><text x="${W-2}" y="${Y(l.v)-3}" fill="${l.c}" font-size="11" text-anchor="end">${esc(l.n)} ${p6(l.v)}</text>`).join('');
+ return `<svg viewBox="0 0 ${W} ${H}">${s}</svg><div class="m" style="font-size:11px"><span style="color:#d29922">━ EMA20</span> · <span style="color:#58a6ff">━ EMA50</span> · <span class="g">แนวรับ</span>/<span class="r">แนวต้าน</span> จากจุดกลับตัว · <span style="color:#a371f7">กรอบม่วง</span> = ช่วงราคาที่น่าจะไปถึงตามความผันผวน (ATR) ไม่ใช่การรับประกัน</div>`;}
 async function showChart(sym,tf){chartSym=sym;chartTf=tf||chartTf||D.tf;$('chTitle').textContent='· '+sym+' '+chartTf;
  $('chTabs').innerHTML=['15m','1h','4h','1d'].map(t=>`<button class="${t===chartTf?'on':''}" data-t="${t}">${t}</button>`).join('');
  $('chTabs').querySelectorAll('button').forEach(b=>b.onclick=()=>showChart(chartSym,b.dataset.t));
  $('chart').innerHTML='<span class="m">กำลังโหลด...</span>';
  try{const r=await fetch('/api/chart?symbol='+encodeURIComponent(sym)+'&tf='+chartTf);const j=await r.json();
   const p=D.positions.find(x=>x.symbol===sym),L=p?[{v:p.entry,n:'ซื้อ',c:'#8b949e'},{v:p.sl,n:'SL',c:'#f85149'},{v:p.tp,n:'TP',c:'#3fb950'}]:[];
-  $('chart').innerHTML=candles(j.k||[],L)+(j.error?'<div class="r">'+esc(j.error)+'</div>':'');}catch(e){$('chart').textContent='โหลดกราฟไม่ได้';}}
+  const R=D.research.find(x=>x.symbol===sym);
+  $('chart').innerHTML=candles(j.k||[],L,j.ov)+(R&&R.checklist?'<div style="font-size:12px;margin-top:6px"><b>เช็กลิสต์ '+esc(R.setup||'')+' · คะแนน '+R.score+'</b><br>'+R.checklist.map(c=>(c[0]?'✅ ':'❌ ')+esc(c[1])).join('<br>')+((R.warn||[]).length?'<br>'+R.warn.map(w=>'⚠️ '+esc(w)).join('<br>'):'')+'</div>':'')+(j.error?'<div class="r">'+esc(j.error)+'</div>':'');}catch(e){$('chart').textContent='โหลดกราฟไม่ได้';}}
 function renderLogs(){const L=D.logs.filter(l=>!sel||l.dept===sel);$('logTitle').textContent=sel?'· '+sel+' (แตะแผนกเดิมเพื่อดูทั้งหมด)':'· ทุกแผนก';
  put('logs',L.map(l=>`<tr><td class="m">${esc(l.t.slice(11,19))}</td><td class="dept">${esc(l.dept)}</td><td style="text-align:left;white-space:normal">${esc(l.msg)}</td></tr>`).join('')||'<tr><td class="m">ยังไม่มี</td></tr>');}
 function renderDepts(){put('depts',D.depts.map(d=>{const a=D.activity[d.name]||{};const act=a.t&&(Date.now()-new Date(a.t).getTime())<20*60000;
@@ -262,7 +273,7 @@ const F=D.forecast,q=D.quote;put('fc',F.positions.length?F.positions.map(r=>{con
 const nowpx=Object.fromEntries(F.positions.map(r=>[r.symbol,r.now]));
 put('pos',D.positions.map(p=>{const n=nowpx[p.symbol]??p.entry,pc=(n/p.entry-1)*100;return `<tr class="click" data-s="${esc(p.symbol)}"><td>📈 ${esc(p.symbol)}</td><td class="${c(pc)}">${p6(n)} (${pc>0?'+':''}${f(pc)}%)</td><td>${p6(p.entry)}</td><td>${f(p.cost)}</td><td>${p6(p.sl)}</td><td>${p6(p.tp)}</td><td class="m" style="text-align:left;white-space:normal;min-width:160px">${esc(p.why)}</td></tr>`;}).join('')||'<tr><td class="m">ยังไม่มี</td></tr>');
 put('dec',D.decisions.map(d=>`<div style="border-bottom:1px solid #30363d;padding:6px 0;font-size:13px"><span class="m">${esc(d.t.slice(11,16))}</span> <b>${esc(d.symbol)}</b> <span class="dept">· ${esc(d.dept.replace('ฝ่าย',''))}</span><div>${esc(d.reason)}</div></div>`).join('')||'<div class="m">ยังไม่มี</div>');
-put('res',D.research.map(r=>{const b=r.bt||{};return `<tr class="click" data-s="${esc(r.symbol)}"><td>${esc(r.symbol)}</td><td>${p6(r.price)}</td><td class="${c(r.chg24)}">${f(r.chg24)}%</td><td>${f(r.rsi,0)}</td><td><b>${r.score}</b></td><td>${b.trades?Math.round(b.p_win*100)+'% <span class="m">('+b.trades+')</span>':'-'}</td><td class="${c(b.ev)}">${b.trades?(b.ev>0?'+':'')+f(b.ev*100)+'%':'-'}</td><td class="m" style="text-align:left;white-space:normal;min-width:160px">${esc(r.why.join(', '))}</td></tr>`;}).join('')||'<tr><td class="m">ยังไม่สแกน</td></tr>');
+put('res',D.research.map(r=>{const b=r.bt||{};return `<tr class="click" data-s="${esc(r.symbol)}"><td>${esc(r.symbol)}</td><td>${p6(r.price)}</td><td class="${c(r.chg24)}">${f(r.chg24)}%</td><td>${f(r.rsi,0)}</td><td><b>${r.score}</b></td><td class="m">${esc(r.setup||'-')}</td><td>${b.trades?Math.round(b.p_win*100)+'% <span class="m">('+b.trades+')</span>':'-'}</td><td class="${c(b.ev)}">${b.trades?(b.ev>0?'+':'')+f(b.ev*100)+'%':'-'}</td></tr>`;}).join('')||'<tr><td class="m">ยังไม่สแกน</td></tr>');
 put('hist',D.closed.map(p=>`<tr><td>${esc(p.symbol)}</td><td>${p6(p.entry)}</td><td>${p6(p.exit)}</td><td class="${c(p.pnl)}">${f(p.pnl)}</td><td>${esc(p.reason)}</td><td class="m">${esc((p.closed||'').slice(5,16).replace('T',' '))}</td></tr>`).join('')||'<tr><td class="m">ยังไม่มี</td></tr>');
 renderDepts();renderLogs();}
 async function load(){clearTimeout(timer);try{const res=await fetch('/api/status',{cache:'no-cache'});if(res.status===401){location.reload();return;}
@@ -379,8 +390,12 @@ def serve(company, port, host="127.0.0.1"):
                     out = hit[1]
                 else:
                     try:
-                        k = company.ex.klines(sym, tf, 100)
-                        out = {"k": [[x[0], float(x[1]), float(x[2]), float(x[3]), float(x[4])] for x in k]}
+                        k = company.ex.klines(sym, tf, 250)
+                        try:
+                            ov = Chart(k).overlay(100)
+                        except Exception:
+                            ov = {}
+                        out = {"k": [[x[0], float(x[1]), float(x[2]), float(x[3]), float(x[4])] for x in k[-100:]], "ov": ov}
                         chart_cache[(sym, tf)] = (time.time(), out)
                     except Exception as e:
                         out = {"k": [], "error": "ดึงกราฟไม่ได้: %s" % e}
