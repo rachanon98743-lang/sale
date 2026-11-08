@@ -30,6 +30,7 @@ from departments import RISK_PROFILES, now_th
 
 REPLY_URL = "https://api.line.me/v2/bot/message/reply"
 API = "https://api.line.me/v2/bot"
+LAST_HOOK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "line_last_webhook.txt")
 HELP = """📋 คำสั่งที่ใช้ได้ (กดปุ่มด้านล่างแชทได้เลย)
 • สถานะ – มูลค่าพอร์ต กำไร โหมด
 • แผนก – งานล่าสุดของทุกแผนก (แตะดูทีละแผนก)
@@ -112,6 +113,11 @@ class LineBot:
     def handle_events(self, payload):
         if payload.get("events"):
             self.last_webhook = time.time()
+            try:  # ให้ manage.sh ข้อ 17 (รันแยกโปรเซส) รู้ด้วยว่าข้อความจริงเข้ามาล่าสุดเมื่อไร
+                with open(LAST_HOOK, "w") as f:
+                    f.write(str(self.last_webhook))
+            except Exception:
+                pass
             self.co.acct.set("line_last_webhook", now_th().isoformat(timespec="seconds"))
         for ev in payload.get("events", []):
             if ev.get("source", {}).get("userId") != self.owner:
@@ -395,7 +401,13 @@ def doctor(bot, fix=True):
             out.append((False, "สวิตช์ Use webhook ใน LINE ปิดอยู่: เข้า developers.line.biz → channel → Messaging API → เปิด Use webhook"))
         # 5) ให้ LINE ลองยิงจริงจากอินเทอร์เน็ต
         t = _line_api(bot, "POST", "/channel/webhook/test", {"endpoint": expected})
-        recent = time.time() - getattr(bot, "last_webhook", 0) < 6 * 3600
+        last = getattr(bot, "last_webhook", 0)
+        try:
+            last = max(last, float(open(LAST_HOOK).read()))
+        except Exception:
+            pass
+        bot.last_webhook = last
+        recent = time.time() - last < 6 * 3600
         if t.get("success"):
             out.append((True, "LINE ทดสอบส่งเข้าบอทสำเร็จ"))
         elif recent:  # ปุ่มทดสอบของ LINE บางครั้งต่อ HTTPS ของ Funnel ไม่ติด แต่ข้อความจริงเข้าได้ ไม่ต้องเตือน
