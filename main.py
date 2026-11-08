@@ -13,7 +13,9 @@ main.py — CEO ของบริษัท AI เทรดคริปโต: �
 import argparse
 import json
 import os
+import signal
 import sys
+import urllib.request
 import threading
 import time
 import traceback
@@ -54,7 +56,7 @@ class Company:
             if saved and self.ex.quote in saved:
                 self.ex.paper = saved
         self.research = ResearchDept(self.ex, self.log, cfg)
-        self.strategy = StrategyDept(self.log)
+        self.strategy = StrategyDept(self.log, self.acct, cfg)
         self.ai = AIAnalystDept(cfg, self.acct, self.log)
         self.riskd = RiskDept(cfg, self.acct, self.log)
         self.exe = ExecutionDept(self.ex, self.acct, self.log)
@@ -65,6 +67,14 @@ class Company:
         self.line = LineNotifier(cfg)
         self.last_ok = time.time()
         self.sell_queue = []  # คำสั่งขายจาก LINE รอทำในลูปหลัก
+        self.started_at = time.time()
+        self.last_eq = None       # มูลค่าพอร์ตล่าสุด (แดชบอร์ด/LINE อ่านค่านี้ ไม่ต้องยิงถาม Binance ทุกครั้ง)
+        self.last_eq_t = 0
+        self.px_cache = {}        # symbol -> (เวลา, ราคา)
+        self.threads = {}         # ชื่อ -> (thread, ฟังก์ชันเปิดใหม่)
+        self.last_hc = 0
+        self.last_acct_log = 0
+        self.downtime_note = None
 
     def log(self, dept, msg, line=False, key=None, every=0, urgent=False):
         """line=True = ส่งข้อความนี้เข้า LINE ด้วย"""
@@ -77,10 +87,63 @@ class Company:
     def mode_label(self):
         return {"paper": "เงินจำลอง", "testnet": "testnet", "live": "เงินจริง"}.get(self.mode, self.mode)
 
-    def equity(self):
+    def prices(self, symbols, max_age=20):
+        """ราคาล่าสุดแบบแคช: ถามกระดานเฉพาะเหรียญที่ข้อมูลเก่ากว่า max_age วินาที"""
+        now = time.time()
+        need = [s for s in symbols if now - self.px_cache.get(s, (0, 0))[0] > max_age]
+        if need:
+            for s, px in self.ex.prices(need).items():
+                self.px_cache[s] = (now, px)
+        return {s: self.px_cache[s][1] for s in symbols if s in self.px_cache}
+
+    def equity(self, max_age=20):
         pos = self.acct.open_positions()
-        px = self.ex.prices([p["symbol"] for p in pos]) if pos else {}
-        return self.ex.usdt_free() + sum(p["qty"] * px.get(p["symbol"], p["entry"]) for p in pos)
+        px = self.prices([p["symbol"] for p in pos], max_age) if pos else {}
+        eq = self.ex.usdt_free() + sum(p["qty"] * px.get(p["symbol"], p["entry"]) for p in pos)
+        self.last_eq, self.last_eq_t = eq, time.time()
+        return eq
+
+    def equity_cached(self):
+        """สำหรับหน้าเว็บ/LINE: ใช้ค่าที่ลูปหลักคำนวณไว้ ไม่ต้องรอ Binance"""
+        if self.last_eq is None or time.time() - self.last_eq_t > 120:
+            try:
+                return self.equity(60)
+            except Exception:
+                return self.last_eq or 0.0
+        return self.last_eq
+
+    def forecast(self):
+        """คาดการณ์ไม้ที่ถืออยู่จากสถิติตอนเข้าซื้อ (ทดสอบย้อนหลัง) — เป็นการประเมินความน่าจะเป็น ไม่ใช่การรับประกัน"""
+        pos = self.acct.open_positions()
+        px = {}
+        try:
+            px = self.prices([p["symbol"] for p in pos], 60) if pos else {}
+        except Exception:
+            pass
+        rows, exp_total, up_total, down_total = [], 0.0, 0.0, 0.0
+        tr = self.acct.summary()
+        base_p = (tr["wins"] / tr["trades"]) if tr["trades"] >= 10 else None
+        for p in pos:
+            m = p.get("meta_d") or {}
+            now = px.get(p["symbol"], p["entry"])
+            cur = p["qty"] * now - p["cost"]
+            win_amt = p["qty"] * p["tp"] * (1 - self.ex.fee) - p["cost"]
+            loss_amt = p["qty"] * p["sl"] * (1 - self.ex.fee) - p["cost"]
+            pw = m.get("p_win")
+            if pw is None:
+                pw = base_p if base_p is not None else (p["entry"] - p["sl"]) / max(1e-12, p["tp"] - p["sl"])
+            # ราคาเดินไปแล้ว: ปรับโอกาสตามตำแหน่งราคาปัจจุบันระหว่าง SL กับ TP
+            pos_frac = min(1, max(0, (now - p["sl"]) / max(1e-12, p["tp"] - p["sl"])))
+            pw_now = min(0.95, max(0.05, 0.5 * pw + 0.5 * pos_frac))
+            exp = pw_now * win_amt + (1 - pw_now) * loss_amt
+            exp_total += exp
+            up_total += win_amt
+            down_total += loss_amt
+            rows.append({"symbol": p["symbol"], "now": now, "entry": p["entry"], "sl": p["sl"], "tp": p["tp"],
+                         "pnl_now": round(cur, 4), "if_tp": round(win_amt, 4), "if_sl": round(loss_amt, 4),
+                         "p_win": round(pw_now, 3), "expected": round(exp, 4), "bt_trades": m.get("bt_trades")})
+        return {"positions": rows, "expected": round(exp_total, 4), "best": round(up_total, 4), "worst": round(down_total, 4),
+                "win_rate": tr["win_rate"], "trades": tr["trades"]}
 
     def day_start_equity(self, eq):
         key = "day_start_" + now_th().date().isoformat()
@@ -123,6 +186,12 @@ class Company:
         self.exe.monitor()
         eq = self.equity()
         self.acct.record_equity(eq)
+        self.heartbeat()
+        if time.time() - self.last_acct_log > 3600:
+            self.last_acct_log = time.time()
+            day0 = self.day_start_equity(eq)
+            self.log("ฝ่ายบัญชี", "มูลค่าพอร์ต %.2f %s (วันนี้ %+.2f%%) ถือ %d ไม้ · เงินสด %.2f" % (
+                eq, self.ex.quote, (eq / day0 - 1) * 100 if day0 else 0, len(self.acct.open_positions()), self.ex.usdt_free()))
         cfg = RISK_PROFILES[self.risk]
         if time.time() - self.last_scan < cfg["every_min"] * 60:
             self.save_paper()
@@ -137,8 +206,10 @@ class Company:
             return
         held = {p["symbol"] for p in self.acct.open_positions()}
         self.last_research = self.research.scan(self.risk)
-        props = self.strategy.proposals(self.last_research, self.risk, held)
-        props = self.ai.review(props, self.regime)
+        props = self.strategy.proposals(self.last_research, self.risk, held, self.regime)
+        if props and self.riskd.slots_left(self.risk, self.regime, len(held)) > 0:
+            props = self.ai.review(props, self.regime, self.acct.track_record())
+        # ถือเต็มแล้ว: ไม่ต้องเสียค่า AI ตรวจ ให้ฝ่ายบริหารความเสี่ยงแจ้งเหตุผลเลย
         orders = self.riskd.approve(props, self.risk, self.regime, self.acct.open_positions(),
                                     self.ex.usdt_free(), eq, self.ex.filters)
         max_spread = float(self.cfg.get("max_spread_pct", 0.5)) / 100
@@ -148,12 +219,14 @@ class Company:
                                       self.research.tickers.get(o["symbol"]))
             if not ok:
                 self.log("ฝ่ายบริหารความเสี่ยง", "ไม่ซื้อ %s: %s" % (o["symbol"], why))
+                self.acct.add_decision("ฝ่ายบริหารความเสี่ยง", o["symbol"], False, "สภาพคล่องไม่ผ่าน: " + why)
                 continue
             self.log("ฝ่ายบริหารความเสี่ยง", "สภาพคล่อง %s ผ่าน (%s)" % (o["symbol"], why))
             try:
                 self.exe.buy(o, self.risk)
             except Exception as e:
                 self.log("ฝ่ายเทรด", "ซื้อ %s ไม่สำเร็จ: %s" % (o["symbol"], e))
+                self.acct.add_decision("ฝ่ายเทรด", o["symbol"], False, "ส่งคำสั่งซื้อไม่สำเร็จ: %s" % e)
         self.save_paper()
         self.daily_report()
 
@@ -169,6 +242,7 @@ class Company:
         if letter:
             self.log("CEO", "บทสรุปจาก AI: " + letter.replace("\n", " "))
         self.acct.set("report_day", today)
+        self.acct.prune()
         day0 = self.acct.get("day_start_" + today) or s["equity"]
         chg = (s["equity"] / day0 - 1) * 100 if day0 else 0
         self.line.send("📊 สรุปประจำวัน %s (%s)\nมูลค่าพอร์ต: %.2f %s (วันนี้ %+.2f%%)\nกำไร/ขาดทุนสะสม: %+.2f\n"
@@ -184,11 +258,72 @@ class Company:
             return ""
         return ("\n⚠️ มี %d ไม้ที่บอทต้องเฝ้า stop loss เอง ถ้าแก้ไม่ได้ให้เข้าแอป Binance ขายเอง" % n) if n else ""
 
+    # ------------------------------------------------------------ ทำงาน 24 ชม.
+    HB = os.path.join(HERE, "heartbeat.json")
+
+    def heartbeat(self, clean=False):
+        try:
+            with open(self.HB, "w") as f:
+                json.dump({"t": time.time(), "clean": clean}, f)
+        except Exception:
+            pass
+        self.ping_healthcheck()
+
+    def check_downtime(self):
+        """เปิดขึ้นมาแล้วดูว่าก่อนหน้านี้ดับไปนานแค่ไหน (เครื่องรีบูต/โปรแกรมล่ม/เน็ตหลุด) แจ้ง LINE ให้รู้"""
+        try:
+            with open(self.HB) as f:
+                hb = json.load(f)
+        except Exception:
+            return
+        gap = time.time() - hb.get("t", time.time())
+        if gap < 180 and hb.get("clean"):
+            return
+        if gap >= 180 or not hb.get("clean"):
+            since = time.strftime("%H:%M", time.localtime(hb["t"]))
+            mins = int(gap // 60)
+            self.downtime_note = "บอทหยุดทำงานไป %d นาที (ตั้งแต่ %s)%s" % (
+                mins, since, "" if hb.get("clean") else " โดยไม่ได้สั่งปิด")
+            if gap >= 180 or (not hb.get("clean") and gap >= 45):
+                self.line.send("⚠️ %s\nตอนนี้เปิดกลับมาเองแล้ว ✅ เฝ้าไม้ที่ถือต่อตามปกติ%s" % (
+                    self.downtime_note, self.unguarded_note()), key="downtime", every_sec=600, urgent=True)
+            self.log("CEO", self.downtime_note + " ตอนนี้กลับมาแล้ว")
+
+    def ping_healthcheck(self):
+        """ถ้าตั้ง HEALTHCHECK_URL (เช่น healthchecks.io ฟรี) จะส่งสัญญาณชีพทุกนาที ถ้าเงียบเกินกำหนด เว็บนั้นแจ้งเตือนให้
+        ใช้จับกรณีที่บอทแจ้งเองไม่ได้ เช่น VPS ดับทั้งเครื่อง"""
+        url = os.environ.get("HEALTHCHECK_URL", "").strip()
+        if not url or time.time() - self.last_hc < 60:
+            return
+        self.last_hc = time.time()
+
+        def go():
+            try:
+                urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "tradingbot"}), timeout=10).read()
+            except Exception:
+                pass
+        threading.Thread(target=go, daemon=True).start()
+
+    def keep_thread(self, name, target, *args):
+        """เปิด thread งานเสริม (แดชบอร์ด, LINE) และจำไว้ ถ้าตายจะถูกเปิดใหม่โดย watchdog"""
+        def start():
+            t = threading.Thread(target=target, args=args, daemon=True, name=name)
+            t.start()
+            self.threads[name] = (t, start)
+        start()
+
     def watchdog(self):
         """ถ้าลูปค้างนานเกิน 15 นาที (เช่นเน็ตค้าง) แจ้ง LINE แล้วปิดโปรแกรม ให้ systemd เปิดใหม่"""
         limit = max(900, self.cfg.get("loop_seconds", 30) * 10)
         while True:
             time.sleep(60)
+            for name, (t, start) in list(self.threads.items()):
+                if not t.is_alive():
+                    self.log("CEO", "ระบบ%s หยุดไป กำลังเปิดใหม่" % name)
+                    try:
+                        start()
+                    except Exception as e:
+                        self.log("CEO", "เปิด%sใหม่ไม่ได้: %s" % (name, e))
             if time.time() - self.last_ok > limit:
                 self.line.send("🔄 บอทค้างเกิน %d นาที กำลังรีสตาร์ตตัวเอง%s" % (limit // 60, self.unguarded_note()),
                                key="hang", every_sec=3600, urgent=True)
@@ -202,6 +337,8 @@ class Company:
                            key="start_err", every_sec=3600, urgent=True)
             raise
         self.last_ok = time.time()
+        self.check_downtime()
+        self.heartbeat()
         threading.Thread(target=self.watchdog, daemon=True).start()
         fails = 0
         while True:
@@ -288,13 +425,20 @@ def main():
     if cfg["mode"] == "live":
         confirm_live(cfg)
     co = Company(cfg)
-    threading.Thread(target=dashboard.serve, args=(co, a.port, a.host), daemon=True).start()
+    co.keep_thread("แดชบอร์ด", dashboard.serve, co, a.port, a.host)
     line_bot.serve(co, cfg.get("line_webhook_port", 8090))
     print("แดชบอร์ด: http://localhost:%d" % a.port)
+
+    def stop(*_):  # systemctl stop/restart = ปิดแบบตั้งใจ ไม่ต้องแจ้งว่าดับ
+        co.save_paper()
+        co.heartbeat(clean=True)
+        os._exit(0)
+    signal.signal(signal.SIGTERM, stop)
     try:
         co.run_forever()
     except KeyboardInterrupt:
         co.save_paper()
+        co.heartbeat(clean=True)
         print("\nปิดบริษัทแล้ว (สถานะที่ถืออยู่ยังอยู่ ถ้าตั้ง OCO ไว้ คำสั่งขายยังรออยู่บน Binance)")
 
 

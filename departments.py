@@ -13,6 +13,7 @@ departments.py — แผนกต่างๆ ของบริษัท AI �
 import json
 import os
 import sqlite3
+import threading
 import time
 import urllib.request
 from datetime import datetime, timezone, timedelta
@@ -115,6 +116,34 @@ def atr_pct(h, lo, c, n=14):
     return (sum(trs[-n:]) / n) / c[-1] if len(trs) >= n else 0.0
 
 
+def exit_levels(cfg, atr):
+    """ระยะตัดขาดทุน/ทำกำไร (สัดส่วน) ใช้ร่วมกันทั้งฝ่ายวิจัย (ทดสอบย้อนหลัง) และฝ่ายกลยุทธ์"""
+    sl = min(max(cfg["sl"], atr * 1.5), cfg["sl"] * 2)  # ผันผวนกว่าปกติ ขยาย stop ตาม ATR แต่ไม่เกิน 2 เท่า
+    tp = max(cfg["tp"], sl * 2)  # กำไรเป้าหมายอย่างน้อย 2 เท่าของความเสี่ยง
+    return sl, tp
+
+
+def _bucket(v, edges, names):
+    for e, n in zip(edges, names):
+        if v < e:
+            return n
+    return names[-1]
+
+
+def features_of(r, regime):
+    """ลักษณะของสัญญาณตอนเข้าซื้อ เก็บไว้ให้ระบบเรียนรู้ว่าแบบไหนชนะ/แพ้บ่อย"""
+    return {
+        "rsi": _bucket(r.get("rsi", 50), [45, 55, 65, 75], ["<45", "45-55", "55-65", "65-75", "75+"]),
+        "chg24": _bucket(r.get("chg24", 0), [0, 3, 8, 15], ["ลบ", "0-3%", "3-8%", "8-15%", "15%+"]),
+        "ext": _bucket(r.get("ext", 0), [0.01, 0.03, 0.06], ["ชิดEMA20", "1-3%", "3-6%", "6%+"]),
+        "regime": regime,
+        "vol": "วอลุ่มพุ่ง" if r.get("spike", 1) > 1.5 else "วอลุ่มปกติ",
+    }
+
+
+FEATURE_TH = {"rsi": "RSI", "chg24": "ขึ้นใน 24 ชม.", "ext": "ห่าง EMA20", "regime": "ตลาด", "vol": "วอลุ่ม"}
+
+
 # ===================================================================== 1. Research
 class ResearchDept:
     name = "ฝ่ายวิจัยตลาด"
@@ -137,24 +166,20 @@ class ResearchDept:
         self.log(self.name, "ภาวะตลาด (BTC รายวัน): %s ราคา %.0f MA50 %.0f MA200 %.0f" % (regime, c[-1], m50, m200))
         return regime
 
-    def analyze(self, k, risk):
-        c = [float(x[4]) for x in k]
-        h = [float(x[2]) for x in k]
-        lo = [float(x[3]) for x in k]
-        v = [float(x[5]) for x in k]
-        n = len(c) - 1
-        p = c[n]
-        e20, e50 = ema(c, 20)[n], ema(c, 50)[n]
-        s200 = sma(c, min(200, n))[n]
-        r = rsi(c)[n] or 50
-        mom = c[n] / c[max(0, n - 10)] - 1
-        vol_avg = sum(v[n - 20:n]) / 20 or 1
-        spike = v[n] / vol_avg
-        hi20 = max(h[n - 20:n])
-        trend_up = p > e20 > e50
+    @staticmethod
+    def _score_at(i, risk, c, h, v, e20, e50, s200, r_arr, atr):
+        """คะแนนสัญญาณ ณ แท่งที่ i (ใช้ทั้งตอนสแกนจริงและตอนทดสอบย้อนหลัง ให้กฎตรงกัน)"""
+        p = c[i]
+        r = r_arr[i] or 50
+        mom = c[i] / c[max(0, i - 10)] - 1
+        vol_avg = sum(v[i - 20:i]) / 20 or 1
+        spike = v[i] / vol_avg
+        hi20 = max(h[i - 20:i])
+        trend_up = e20[i] is not None and e50[i] is not None and p > e20[i] > e50[i]
+        ext = p / e20[i] - 1 if e20[i] else 0
         score, why = 0, []
         if risk == "low":
-            if p > s200: score += 30; why.append("เหนือ MA200")
+            if s200[i] and p > s200[i]: score += 30; why.append("เหนือ MA200")
             if trend_up: score += 30; why.append("EMA20>EMA50")
             if 40 <= r <= 65: score += 25; why.append("RSI %.0f ไม่ร้อนเกิน" % r)
             elif r > 75: score -= 20
@@ -173,8 +198,67 @@ class ResearchDept:
             if trend_up: score += 20
             if r < 85: score += 10
             else: score -= 25
-        return {"price": p, "rsi": r, "trend_up": trend_up, "mom": mom, "atr": atr_pct(h, lo, c),
-                "score": max(0, min(100, score)), "why": why}
+        # กฎนักเทรดมืออาชีพ: ไม่ไล่ราคาที่วิ่งห่างเส้นค่าเฉลี่ยเกิน 3 เท่าของความผันผวน (เสี่ยงซื้อยอดดอย)
+        if atr > 0 and ext > max(0.03, atr * 3):
+            score -= 15
+            why.append("ห่าง EMA20 %.1f%% (เสี่ยงไล่ราคา)" % (ext * 100))
+        return max(0, min(100, score)), why, {"rsi": r, "mom": mom, "spike": spike, "trend_up": trend_up, "ext": ext}
+
+    def analyze(self, k, risk):
+        c = [float(x[4]) for x in k]
+        h = [float(x[2]) for x in k]
+        lo = [float(x[3]) for x in k]
+        v = [float(x[5]) for x in k]
+        n = len(c) - 1
+        e20, e50 = ema(c, 20), ema(c, 50)
+        s200 = sma(c, min(200, n))
+        r_arr = rsi(c)
+        atr = atr_pct(h, lo, c)
+        score, why, f = self._score_at(n, risk, c, h, v, e20, e50, s200, r_arr, atr)
+        bt = self.backtest(risk, c, h, lo, v, e20, e50, s200, r_arr, atr)
+        return {"price": c[n], "rsi": f["rsi"], "trend_up": f["trend_up"], "mom": f["mom"], "atr": atr,
+                "ext": f["ext"], "spike": f["spike"], "score": score, "why": why, "bt": bt}
+
+    def backtest(self, risk, c, h, lo, v, e20, e50, s200, r_arr, atr):
+        """ทดสอบย้อนหลังบนกราฟของเหรียญนี้เอง: ทุกครั้งที่สัญญาณแบบเดียวกันเกิด แล้วซื้อตามกฎ SL/TP เดียวกัน
+        ผลเป็นอย่างไร (ไม่นับไม้ซ้อนกัน) ใช้ประเมินโอกาสชนะและกำไรคาดหวังของสัญญาณตอนนี้"""
+        cfg = RISK_PROFILES[risk]
+        sl, tp = exit_levels(cfg, atr)
+        fee = float(self.cfg.get("fee", 0.001))
+        horizon = int(self.cfg.get("backtest_horizon_bars", 48))
+        n = len(c) - 1
+        wins = losses = timeouts = 0
+        rets = []
+        i = 60
+        while i < n - 1:
+            sc = self._score_at(i, risk, c, h, v, e20, e50, s200, r_arr, atr)[0]
+            if sc < cfg["min_score"]:
+                i += 1
+                continue
+            entry = c[i]
+            stop, target = entry * (1 - sl), entry * (1 + tp)
+            ret, j = None, i + 1
+            while j <= min(n, i + horizon):
+                if lo[j] <= stop:  # ถ้าแท่งเดียวโดนทั้งคู่ นับว่าโดน SL ก่อน (มองแง่ร้ายไว้ก่อน)
+                    ret = -sl; losses += 1
+                    break
+                if h[j] >= target:
+                    ret = tp; wins += 1
+                    break
+                j += 1
+            if ret is None:
+                if j - 1 >= n and n - i < horizon:
+                    break  # ยังไม่จบ (ข้อมูลไม่พอ) ไม่นับ
+                ret = c[min(n, i + horizon)] / entry - 1; timeouts += 1
+            rets.append(ret - 2 * fee)
+            i = j + 1
+        trades = len(rets)
+        k = 4  # หดผลเข้าหาค่ากลาง (ขาดทุนเท่าค่าธรรมเนียม) เมื่อจำนวนตัวอย่างน้อย กันการมั่นใจเกินจริง
+        ev = (sum(rets) - k * 2 * fee) / (trades + k)
+        prior = sl / (sl + tp)
+        p_win = (wins + k * prior) / (trades + k)
+        return {"trades": trades, "wins": wins, "losses": losses, "timeouts": timeouts,
+                "p_win": round(p_win, 3), "ev": round(ev, 4), "sl": sl, "tp": tp}
 
     def scan(self, risk):
         cfg = RISK_PROFILES[risk]
@@ -245,23 +329,75 @@ class ResearchDept:
 class StrategyDept:
     name = "ฝ่ายกลยุทธ์"
 
-    def __init__(self, log):
-        self.log = log
+    def __init__(self, log, acct=None, cfg=None):
+        self.log, self.acct, self.cfg = log, acct, cfg or {}
+        self.learned = {}
 
-    def proposals(self, research, risk, held):
+    def learn(self):
+        """เรียนรู้จากผลเทรดจริงของบอทเอง: ลักษณะสัญญาณแบบไหนชนะ/แพ้บ่อย (ต้องมีอย่างน้อย 5 ไม้ต่อแบบ)"""
+        if not self.acct:
+            return {}
+        stats = {}
+        for p in self.acct.closed_positions(2000):
+            meta = p.get("meta_d") or {}
+            for k, val in (meta.get("features") or {}).items():
+                st = stats.setdefault((k, val), [0, 0, 0.0])
+                st[0] += 1
+                st[1] += 1 if p["pnl"] > 0 else 0
+                st[2] += p["pnl"] / p["cost"] if p["cost"] else 0
+        self.learned = {key: {"n": n, "win": w / n, "avg": ret / n} for key, (n, w, ret) in stats.items() if n >= 5}
+        return self.learned
+
+    def adjust(self, feats):
+        """ปรับคะแนนจากสิ่งที่เรียนรู้ ±15 สูงสุด คืน (ค่าปรับ, คำอธิบาย)"""
+        adj, notes = 0.0, []
+        for k, val in feats.items():
+            st = self.learned.get((k, val))
+            if not st:
+                continue
+            a = max(-8, min(8, (st["win"] - 0.5) * 20 + st["avg"] * 100))
+            if abs(a) >= 2:
+                adj += a
+                notes.append("%s %s ชนะ %.0f%% จาก %d ไม้" % (FEATURE_TH.get(k, k), val, st["win"] * 100, st["n"]))
+        return max(-15, min(15, adj)), notes
+
+    def proposals(self, research, risk, held, regime="neutral"):
         cfg = RISK_PROFILES[risk]
+        self.learn()
+        min_ev = float(self.cfg.get("min_backtest_ev_pct", 0)) / 100
+        min_bt = int(self.cfg.get("min_backtest_trades", 6))
         out = []
         for r in research:
-            if r["score"] < cfg["min_score"] or r["symbol"] in held:
+            if r["symbol"] in held:
                 continue
-            # ถ้าเหรียญผันผวนกว่าปกติ ขยาย stop ตาม ATR แต่ไม่เกิน 2 เท่าของค่าตั้งต้น
-            sl = min(max(cfg["sl"], r["atr"] * 1.5), cfg["sl"] * 2)
-            tp = max(cfg["tp"], sl * 2)  # กำไรเป้าหมายอย่างน้อย 2 เท่าของความเสี่ยง
-            out.append({"symbol": r["symbol"], "price": r["price"], "score": r["score"], "why": r["why"],
-                        "sl_pct": sl, "tp_pct": tp, "rsi": r["rsi"], "mom": r["mom"], "chg24": r["chg24"]})
+            feats = features_of(r, regime)
+            adj, notes = self.adjust(feats)
+            score = r["score"] + adj
+            if score < cfg["min_score"]:
+                if r["score"] >= cfg["min_score"]:  # ผ่านเกณฑ์เดิม แต่สถิติของบอทเองบอกว่าแบบนี้แพ้บ่อย
+                    self.reject(r["symbol"], "คะแนน %d → %.0f หลังเรียนรู้จากผลเทรดเอง (%s)" % (
+                        r["score"], score, "; ".join(notes)))
+                continue
+            bt = r.get("bt") or {}
+            if bt.get("trades", 0) >= min_bt and bt.get("ev", 0) < min_ev:
+                self.reject(r["symbol"], "ทดสอบย้อนหลังสัญญาณนี้ %d ครั้ง ชนะ %d ได้เฉลี่ย %+.2f%%/ไม้ (ไม่คุ้ม)" % (
+                    bt["trades"], bt["wins"], bt["ev"] * 100))
+                continue
+            sl, tp = exit_levels(cfg, r["atr"])
+            why = list(r["why"]) + (["เรียนรู้ %+.0f" % adj] if adj else [])
+            out.append({"symbol": r["symbol"], "price": r["price"], "score": round(score), "why": why,
+                        "sl_pct": sl, "tp_pct": tp, "rsi": r["rsi"], "mom": r["mom"], "chg24": r["chg24"],
+                        "ext": r.get("ext", 0), "bt": bt, "features": feats, "learn_notes": notes})
         if out:
-            self.log(self.name, "เสนอซื้อ %d ตัว: %s" % (len(out), ", ".join(p["symbol"] for p in out[:8])))
+            self.log(self.name, "เสนอซื้อ %d ตัว: %s" % (len(out), ", ".join(
+                "%s(ย้อนหลังชนะ %.0f%% คาด %+.1f%%)" % (p["symbol"], p["bt"].get("p_win", 0) * 100, p["bt"].get("ev", 0) * 100)
+                for p in out[:6])))
         return out
+
+    def reject(self, symbol, reason):
+        self.log(self.name, "ไม่เสนอ %s: %s" % (symbol, reason))
+        if self.acct:
+            self.acct.add_decision(self.name, symbol, False, reason)
 
 
 # ===================================================================== 3. AI Analyst (Claude)
@@ -324,20 +460,32 @@ class AIAnalystDept:
         self.acct.add_ai_call(purpose, self.model, tin, tout, cost, text[:600])
         return text
 
-    def review(self, proposals, regime):
+    PLAYBOOK = """หลักของนักเทรดมืออาชีพที่ต้องใช้ตัดสิน:
+1) เทรดตามแนวโน้มใหญ่ ไม่สวนตลาด: ตลาดรวม bear = เข้มงวดขึ้นมาก
+2) ไม่ไล่ราคา: chg24 สูงมาก หรือ ext (ระยะห่างจาก EMA20) สูง = รอให้ย่อก่อน
+3) RSI > 70 = ร้อนเกิน เสี่ยงพักตัว ยกเว้นแนวโน้มแรงและวอลุ่มยืนยัน
+4) ต้องคุ้มความเสี่ยง: tp_pct อย่างน้อย 2 เท่าของ sl_pct และ bt.ev (กำไรคาดหวังจากการทดสอบย้อนหลังบนเหรียญนี้) ควรเป็นบวก
+5) bt.trades น้อย (<6) = สถิติไม่น่าเชื่อถือ ให้น้ำหนักกับหลักข้อ 1-3 มากกว่า
+6) ใช้สถิติผลเทรดจริงของบอท (track_record) ถ้าแบบไหนแพ้บ่อย ให้ระวัง
+7) รักษาเงินต้นสำคัญกว่าทำกำไร: ถ้าไม่แน่ใจ ให้ปฏิเสธ"""
+
+    def review(self, proposals, regime, track=None):
         if not self.enabled or not proposals:
             return proposals
         _, _, over = self.budget_status()
         if over:
             self.log(self.name, "ถึงเพดาน (%s) หยุดเรียก AI อนุมัติตามกฎอย่างเดียว" % ", ".join(over))
             return proposals
-        brief = [{k: (round(v, 4) if isinstance(v, float) else v) for k, v in p.items()} for p in proposals[:8]]
+        keys = ("symbol", "price", "score", "why", "sl_pct", "tp_pct", "rsi", "mom", "chg24", "ext", "bt")
+        brief = [{k: (round(p[k], 4) if isinstance(p[k], float) else p[k]) for k in keys if k in p} for p in proposals[:8]]
         prompt = (
-            "คุณเป็นนักวิเคราะห์ความเสี่ยงของกองทุนคริปโต ภาวะตลาดรวมตอนนี้: %s\n"
-            "ข้อเสนอซื้อจากระบบ (score 0-100, sl_pct/tp_pct เป็นสัดส่วน, mom = โมเมนตัม 10 แท่ง, chg24 = %% เปลี่ยน 24 ชม.):\n%s\n\n"
-            "ตรวจแต่ละตัว ปฏิเสธตัวที่ดูไล่ราคา (chg24 สูงเกินไป), RSI ร้อนเกิน หรือขัดกับภาวะตลาด\n"
-            "ตอบเป็น JSON อย่างเดียว รูปแบบ: {\"decisions\":[{\"symbol\":\"XXXUSDT\",\"approve\":true,\"reason\":\"สั้นๆ ภาษาไทย\"}]}"
-        ) % (regime, json.dumps(brief, ensure_ascii=False))
+            "คุณเป็นผู้จัดการความเสี่ยงของกองทุนคริปโต ประสบการณ์เทรด spot มา 15 ปี\n%s\n\n"
+            "ภาวะตลาดรวมตอนนี้ (BTC รายวัน): %s\nสถิติผลเทรดจริงของบอท: %s\n"
+            "ข้อเสนอซื้อจากระบบ (score 0-100, sl_pct/tp_pct เป็นสัดส่วน, mom = โมเมนตัม 10 แท่ง, chg24 = %% เปลี่ยน 24 ชม., "
+            "ext = ระยะห่างจาก EMA20, bt = ผลทดสอบย้อนหลังสัญญาณเดียวกันบนเหรียญนี้: p_win โอกาสชนะ, ev กำไรคาดหวังต่อไม้):\n%s\n\n"
+            "ตัดสินทีละตัว เหตุผลภาษาไทยสั้นๆ อ่านง่าย (ไม่เกิน 25 คำ) อ้างตัวเลขที่ใช้ตัดสิน\n"
+            "ตอบเป็น JSON อย่างเดียว รูปแบบ: {\"decisions\":[{\"symbol\":\"XXXUSDT\",\"approve\":true,\"reason\":\"...\"}]}"
+        ) % (self.PLAYBOOK, regime, json.dumps(track or {}, ensure_ascii=False), json.dumps(brief, ensure_ascii=False))
         try:
             text = self._call(prompt, purpose="ตรวจข้อเสนอซื้อ %d ตัว" % len(brief))
             j = json.loads(text[text.index("{"):text.rindex("}") + 1])
@@ -349,9 +497,14 @@ class AIAnalystDept:
         for p in proposals:
             d = dec.get(p["symbol"])
             if d is None or d.get("approve"):
+                p["ai_reason"] = (d or {}).get("reason", "")
                 approved.append(p)
+                self.acct.add_decision(self.name, p["symbol"], True, p["ai_reason"] or "ผ่าน")
+                if p["ai_reason"]:
+                    self.log(self.name, "อนุมัติ %s: %s" % (p["symbol"], p["ai_reason"]))
             else:
                 self.log(self.name, "ปฏิเสธ %s: %s" % (p["symbol"], d.get("reason", "")))
+                self.acct.add_decision(self.name, p["symbol"], False, d.get("reason", "") or "ไม่ระบุเหตุผล")
         self.log(self.name, "อนุมัติ %d/%d (ค่า AI วันนี้ $%.4f)" % (len(approved), len(proposals), self.acct.ai_cost_today()))
         return approved
 
@@ -403,23 +556,39 @@ class RiskDept:
             size_mult = 1.0
         capital = min(equity_now, self.max_capital)  # ใช้เงินไม่เกินเพดานที่ตั้งไว้
         used = sum(p["cost"] for p in open_pos)
-        orders = []
+        orders, full, poor = [], [], []
         for p in proposals:
             if slots <= 0:
-                break
+                full.append(p["symbol"])
+                continue
             amt = capital * cfg["size"] * size_mult
             room = capital * (1 - self.reserve) - used
             amt = min(amt, room, usdt_free * 0.99)
             if amt < filters[p["symbol"]]["min_notional"] * 1.2:
-                self.log(self.name, "ไม่อนุมัติ %s: เงินไม่พอขั้นต่ำ (%.2f)" % (p["symbol"], amt))
-                break
+                poor.append(p["symbol"])
+                continue
             orders.append(dict(p, usdt=round(amt, 2)))
             used += amt
             usdt_free -= amt
             slots -= 1
+        if full:  # รวมเป็นบรรทัดเดียว ไม่ให้ log/LINE รก
+            self.deny(full, "ถือครบ %d ไม้แล้ว (เพดานความเสี่ยง%s) รอให้มีไม้ปิดก่อน" % (cfg["max_pos"], cfg["name"])
+                      if regime != "bear" else "ตลาดขาลง เปิดได้ทีละ 1 ไม้")
+        if poor:
+            self.deny(poor, "เงินที่เหลือไม่ถึงขั้นต่ำต่อไม้ (เก็บเงินสำรองไว้ %.0f%% ไม่ใช้)" % (self.reserve * 100))
         if orders:
-            self.log(self.name, "อนุมัติ %d คำสั่ง (ตลาด %s, ใช้ทุนสูงสุด %.0f)" % (len(orders), regime, capital))
+            self.log(self.name, "อนุมัติ %d คำสั่ง (ตลาด %s, ใช้ทุนสูงสุด %.0f): %s" % (
+                len(orders), regime, capital, ", ".join("%s %.2f" % (o["symbol"], o["usdt"]) for o in orders)))
         return orders
+
+    def deny(self, symbols, why):
+        names = ", ".join(symbols)
+        self.log(self.name, "ไม่อนุมัติ %s: %s" % (names, why))
+        self.acct.add_decision(self.name, names if len(names) <= 120 else names[:117] + "...", False, why)
+
+    def slots_left(self, risk, regime, n_open):
+        s = RISK_PROFILES[risk]["max_pos"] - n_open
+        return min(s, 1) if regime == "bear" else s
 
 
 # ===================================================================== 5. Execution
@@ -440,9 +609,17 @@ class ExecutionDept:
             oco = self.ex.place_oco_exit(s, qty, tp, sl)
         except Exception as e:
             self.log(self.name, "ตั้ง OCO บนกระดานไม่สำเร็จ (%s) จะเฝ้าราคาเองแทน" % e)
-        pid = self.acct.open_position(s, qty, px, spent, sl, tp, oco, risk, "; ".join(o["why"]))
-        self.log(self.name, "🟢 ซื้อ %s %.6g @ %.6g ใช้ %.2f | SL %.6g TP %.6g %s" % (
-            s, qty, px, spent, sl, tp, "(OCO บนกระดาน)" if oco else "(เฝ้าเอง)"), line=True)
+        bt = o.get("bt") or {}
+        meta = {"features": o.get("features") or {}, "p_win": bt.get("p_win"), "ev": bt.get("ev"),
+                "bt_trades": bt.get("trades"), "ai_reason": o.get("ai_reason", ""), "score": o.get("score")}
+        pid = self.acct.open_position(s, qty, px, spent, sl, tp, oco, risk, "; ".join(o["why"]), meta)
+        fc = ""
+        if bt.get("p_win") is not None:
+            fc = "\n📐 คาดการณ์: โอกาสถึงเป้า ~%.0f%% · ถ้าถึงเป้า +%.2f · ถ้าโดนตัด -%.2f · คาดหวัง %+.2f (%+.1f%%)" % (
+                bt["p_win"] * 100, spent * o["tp_pct"], spent * o["sl_pct"], spent * bt.get("ev", 0), bt.get("ev", 0) * 100)
+        why = ("\n🧠 AI: " + o["ai_reason"]) if o.get("ai_reason") else ""
+        self.log(self.name, "🟢 ซื้อ %s %.6g @ %.6g ใช้ %.2f | SL %.6g TP %.6g %s%s%s" % (
+            s, qty, px, spent, sl, tp, "(OCO บนกระดาน)" if oco else "(เฝ้าเอง)", fc, why), line=True)
         return pid
 
     def monitor(self):
@@ -490,8 +667,10 @@ class AccountingDept:
     name = "ฝ่ายบัญชี"
 
     def __init__(self, path):
-        self.db = sqlite3.connect(path, check_same_thread=False)
+        self.lock = threading.RLock()  # แดชบอร์ด, LINE และลูปหลักใช้ฐานข้อมูลพร้อมกันได้อย่างปลอดภัย
+        self.db = sqlite3.connect(path, check_same_thread=False, timeout=30)
         self.db.row_factory = sqlite3.Row
+        self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript("""
         CREATE TABLE IF NOT EXISTS positions(id INTEGER PRIMARY KEY, symbol TEXT, qty REAL, entry REAL, cost REAL,
             sl REAL, tp REAL, oco_id TEXT, risk TEXT, why TEXT, opened TEXT, status TEXT DEFAULT 'open',
@@ -501,88 +680,143 @@ class AccountingDept:
         CREATE TABLE IF NOT EXISTS ai_calls(t TEXT, purpose TEXT, model TEXT, tin INTEGER, tout INTEGER, usd REAL, result TEXT);
         CREATE TABLE IF NOT EXISTS logs(t TEXT, dept TEXT, msg TEXT);
         CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT);
+        CREATE TABLE IF NOT EXISTS decisions(t TEXT, dept TEXT, symbol TEXT, ok INTEGER, reason TEXT);
+        CREATE INDEX IF NOT EXISTS logs_t ON logs(t);
+        CREATE INDEX IF NOT EXISTS logs_dept ON logs(dept, t);
+        CREATE INDEX IF NOT EXISTS equity_t ON equity(t);
+        CREATE INDEX IF NOT EXISTS ai_calls_t ON ai_calls(t);
+        CREATE INDEX IF NOT EXISTS decisions_t ON decisions(t);
+        CREATE INDEX IF NOT EXISTS pos_status ON positions(status);
         """)
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(positions)")}
+        if "meta" not in cols:
+            self.db.execute("ALTER TABLE positions ADD COLUMN meta TEXT")
         self.db.commit()
+        self.prune()
 
-    def open_position(self, symbol, qty, entry, cost, sl, tp, oco, risk, why):
-        c = self.db.execute("INSERT INTO positions(symbol,qty,entry,cost,sl,tp,oco_id,risk,why,opened) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                            (symbol, qty, entry, cost, sl, tp, oco, risk, why, now_th().isoformat()))
-        self.db.commit()
-        return c.lastrowid
+    # ---- ตัวช่วยใช้ฐานข้อมูลแบบล็อก
+    def _q(self, sql, args=()):
+        with self.lock:
+            return [dict(r) for r in self.db.execute(sql, args).fetchall()]
+
+    def _one(self, sql, args=()):
+        with self.lock:
+            r = self.db.execute(sql, args).fetchone()
+            return dict(r) if r else None
+
+    def _x(self, sql, args=()):
+        with self.lock:
+            c = self.db.execute(sql, args)
+            self.db.commit()
+            return c.lastrowid
+
+    def prune(self):
+        """เก็บ log 30 วัน, มูลค่าพอร์ตละเอียด 3 วัน (เก่ากว่านั้นเก็บชั่วโมงละจุด) กันฐานข้อมูลบวมจนแดชบอร์ดช้า"""
+        old = (now_th() - timedelta(days=30)).isoformat()
+        d3 = (now_th() - timedelta(days=3)).isoformat()
+        with self.lock:
+            self.db.execute("DELETE FROM logs WHERE t < ?", (old,))
+            self.db.execute("DELETE FROM decisions WHERE t < ?", (old,))
+            self.db.execute("DELETE FROM equity WHERE t < ? AND rowid NOT IN (SELECT MIN(rowid) FROM equity WHERE t < ? GROUP BY substr(t,1,13))", (d3, d3))
+            self.db.commit()
+
+    @staticmethod
+    def _pos(r):
+        try:
+            r["meta_d"] = json.loads(r.get("meta") or "{}")
+        except ValueError:
+            r["meta_d"] = {}
+        return r
+
+    def open_position(self, symbol, qty, entry, cost, sl, tp, oco, risk, why, meta=None):
+        return self._x("INSERT INTO positions(symbol,qty,entry,cost,sl,tp,oco_id,risk,why,opened,meta) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                       (symbol, qty, entry, cost, sl, tp, oco, risk, why, now_th().isoformat(), json.dumps(meta or {}, ensure_ascii=False)))
 
     def close_position(self, pid, exit_px, proceeds, reason):
-        row = self.db.execute("SELECT cost FROM positions WHERE id=?", (pid,)).fetchone()
-        self.db.execute("UPDATE positions SET status='closed', exit=?, proceeds=?, pnl=?, reason=?, closed=? WHERE id=?",
-                        (exit_px, proceeds, proceeds - row["cost"], reason, now_th().isoformat(), pid))
-        self.db.commit()
+        row = self._one("SELECT symbol, cost FROM positions WHERE id=?", (pid,))
+        self._x("UPDATE positions SET status='closed', exit=?, proceeds=?, pnl=?, reason=?, closed=? WHERE id=?",
+                (exit_px, proceeds, proceeds - row["cost"], reason, now_th().isoformat(), pid))
+        self.log(self.name, "ลงบัญชีปิดไม้ %s: %s กำไร/ขาดทุน %+.2f" % (row["symbol"], reason, proceeds - row["cost"]))
 
     def open_positions(self):
-        return [dict(r) for r in self.db.execute("SELECT * FROM positions WHERE status='open'")]
+        return [self._pos(r) for r in self._q("SELECT * FROM positions WHERE status='open'")]
 
     def closed_positions(self, limit=100):
-        return [dict(r) for r in self.db.execute("SELECT * FROM positions WHERE status='closed' ORDER BY id DESC LIMIT ?", (limit,))]
+        return [self._pos(r) for r in self._q("SELECT * FROM positions WHERE status='closed' ORDER BY id DESC LIMIT ?", (limit,))]
 
     def record_equity(self, v):
-        self.db.execute("INSERT INTO equity VALUES(?,?)", (now_th().isoformat(), v))
-        self.db.commit()
+        self._x("INSERT INTO equity VALUES(?,?)", (now_th().isoformat(timespec="seconds"), v))
+
+    def equity_series(self, days=7, points=240):
+        rows = self._q("SELECT t, value FROM equity WHERE t >= ? ORDER BY t", ((now_th() - timedelta(days=days)).isoformat(),))
+        step = max(1, len(rows) // points)
+        out = rows[::step]
+        if rows and out[-1] is not rows[-1]:
+            out.append(rows[-1])
+        return [[r["t"][:16], round(r["value"], 4)] for r in out]
 
     def add_ai_cost(self, usd):
-        d = now_th().date().isoformat()
-        self.db.execute("INSERT INTO ai_cost VALUES(?,?) ON CONFLICT(day) DO UPDATE SET usd=usd+excluded.usd", (d, usd))
-        self.db.commit()
+        self._x("INSERT INTO ai_cost VALUES(?,?) ON CONFLICT(day) DO UPDATE SET usd=usd+excluded.usd", (now_th().date().isoformat(), usd))
 
     def ai_cost_today(self):
-        r = self.db.execute("SELECT usd FROM ai_cost WHERE day=?", (now_th().date().isoformat(),)).fetchone()
+        r = self._one("SELECT usd FROM ai_cost WHERE day=?", (now_th().date().isoformat(),))
         return r["usd"] if r else 0.0
 
     def add_ai_call(self, purpose, model, tin, tout, usd, result):
-        self.db.execute("INSERT INTO ai_calls VALUES(?,?,?,?,?,?,?)",
-                        (now_th().isoformat(timespec="seconds"), purpose, model, tin, tout, usd, result))
-        self.db.commit()
+        self._x("INSERT INTO ai_calls VALUES(?,?,?,?,?,?,?)", (now_th().isoformat(timespec="seconds"), purpose, model, tin, tout, usd, result))
 
     def ai_usage(self):
         d = now_th().date().isoformat()
-        m = d[:7]
-        r1 = self.db.execute("SELECT COALESCE(SUM(usd),0) u, COALESCE(SUM(tin+tout),0) t, COUNT(*) n FROM ai_calls WHERE t LIKE ?", (d + "%",)).fetchone()
-        r2 = self.db.execute("SELECT COALESCE(SUM(usd),0) u, COALESCE(SUM(tin+tout),0) t FROM ai_calls WHERE t LIKE ?", (m + "%",)).fetchone()
+        r1 = self._one("SELECT COALESCE(SUM(usd),0) u, COALESCE(SUM(tin+tout),0) t, COUNT(*) n FROM ai_calls WHERE t >= ?", (d,))
+        r2 = self._one("SELECT COALESCE(SUM(usd),0) u, COALESCE(SUM(tin+tout),0) t FROM ai_calls WHERE t >= ?", (d[:7] + "-01",))
         return {"day_usd": max(r1["u"], self.ai_cost_today()), "day_tokens": r1["t"], "day_calls": r1["n"],
                 "month_usd": r2["u"], "month_tokens": r2["t"]}
 
     def recent_ai_calls(self, n=30):
-        return [dict(r) for r in self.db.execute("SELECT * FROM ai_calls ORDER BY rowid DESC LIMIT ?", (n,))]
+        return self._q("SELECT * FROM ai_calls ORDER BY rowid DESC LIMIT ?", (n,))
+
+    def add_decision(self, dept, symbol, ok, reason):
+        self._x("INSERT INTO decisions VALUES(?,?,?,?,?)", (now_th().isoformat(timespec="seconds"), dept, symbol, 1 if ok else 0, reason))
+
+    def recent_decisions(self, n=30, only_rejected=False):
+        return self._q("SELECT * FROM decisions %s ORDER BY rowid DESC LIMIT ?" % ("WHERE ok=0" if only_rejected else ""), (n,))
 
     def dept_activity(self):
-        """การทำงานล่าสุดของแต่ละแผนก"""
-        rows = self.db.execute("SELECT dept, MAX(t) t, COUNT(*) n FROM logs WHERE t >= ? GROUP BY dept",
-                               (now_th().date().isoformat(),)).fetchall()
+        """การทำงานล่าสุดของแต่ละแผนก (ใช้ index ไม่ต้องอ่านทั้งตาราง)"""
         out = {}
-        for r in rows:
-            last = self.db.execute("SELECT msg FROM logs WHERE dept=? ORDER BY rowid DESC LIMIT 1", (r["dept"],)).fetchone()
+        for r in self._q("SELECT dept, MAX(t) t, COUNT(*) n FROM logs WHERE t >= ? GROUP BY dept", (now_th().date().isoformat(),)):
+            last = self._one("SELECT msg FROM logs WHERE dept=? AND t=? ORDER BY rowid DESC LIMIT 1", (r["dept"], r["t"]))
             out[r["dept"]] = {"t": r["t"], "today": r["n"], "last": last["msg"] if last else ""}
         return out
 
+    def dept_logs(self, dept, n=12):
+        return self._q("SELECT * FROM logs WHERE dept=? ORDER BY t DESC, rowid DESC LIMIT ?", (dept, n))
+
     def log(self, dept, msg):
-        self.db.execute("INSERT INTO logs VALUES(?,?,?)", (now_th().isoformat(timespec="seconds"), dept, msg))
-        self.db.commit()
+        self._x("INSERT INTO logs VALUES(?,?,?)", (now_th().isoformat(timespec="seconds"), dept, msg))
 
     def recent_logs(self, n=80):
-        return [dict(r) for r in self.db.execute("SELECT * FROM logs ORDER BY rowid DESC LIMIT ?", (n,))]
+        return self._q("SELECT * FROM logs ORDER BY rowid DESC LIMIT ?", (n,))
 
     def get(self, k, default=None):
-        r = self.db.execute("SELECT v FROM kv WHERE k=?", (k,)).fetchone()
+        r = self._one("SELECT v FROM kv WHERE k=?", (k,))
         return json.loads(r["v"]) if r else default
 
     def set(self, k, v):
-        self.db.execute("INSERT INTO kv VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (k, json.dumps(v)))
-        self.db.commit()
+        self._x("INSERT INTO kv VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (k, json.dumps(v)))
 
     def summary(self):
-        closed = self.closed_positions(10000)
-        wins = [p for p in closed if p["pnl"] > 0]
-        total = sum(p["pnl"] for p in closed)
-        return {"trades": len(closed), "wins": len(wins),
-                "win_rate": round(len(wins) / len(closed) * 100, 1) if closed else 0,
-                "realized_pnl": round(total, 2),
-                "avg_win": round(sum(p["pnl"] for p in wins) / len(wins), 2) if wins else 0,
-                "avg_loss": round(sum(p["pnl"] for p in closed if p["pnl"] <= 0) / max(1, len(closed) - len(wins)), 2),
-                "open": len(self.open_positions())}
+        r = self._one("""SELECT COUNT(*) n, COALESCE(SUM(pnl>0),0) w, COALESCE(SUM(pnl),0) tot,
+            COALESCE(AVG(CASE WHEN pnl>0 THEN pnl END),0) aw, COALESCE(AVG(CASE WHEN pnl<=0 THEN pnl END),0) al
+            FROM positions WHERE status='closed'""")
+        n_open = self._one("SELECT COUNT(*) n FROM positions WHERE status='open'")["n"]
+        return {"trades": r["n"], "wins": r["w"], "win_rate": round(r["w"] / r["n"] * 100, 1) if r["n"] else 0,
+                "realized_pnl": round(r["tot"], 2), "avg_win": round(r["aw"], 2), "avg_loss": round(r["al"], 2), "open": n_open}
+
+    def track_record(self):
+        """สถิติย่อให้ AI ใช้ประกอบการตัดสิน"""
+        s = self.summary()
+        last = self.closed_positions(10)
+        return {"trades": s["trades"], "win_rate_pct": s["win_rate"], "avg_win": s["avg_win"], "avg_loss": s["avg_loss"],
+                "last10": [{"symbol": p["symbol"], "pnl_pct": round(p["pnl"] / p["cost"] * 100, 1) if p["cost"] else 0,
+                            "reason": p["reason"]} for p in last]}

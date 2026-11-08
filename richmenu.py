@@ -29,7 +29,7 @@ def call(method, url, token, body=None, ctype="application/json"):
             raw = r.read()
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as e:
-        sys.exit("❌ LINE ตอบ HTTP %s: %s" % (e.code, e.read().decode(errors="replace")[:300]))
+        raise RuntimeError("LINE ตอบ HTTP %s: %s" % (e.code, e.read().decode(errors="replace")[:300]))
 
 
 def dashboard_url(strict=True):
@@ -50,26 +50,45 @@ def dashboard_url(strict=True):
         return None
 
 
-def main():
-    token = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
-    if not token:
-        sys.exit("❌ ยังไม่ได้ตั้ง LINE_CHANNEL_ACCESS_TOKEN (manage.sh ข้อ 11)")
-    # ลบเมนูเก่าของบอทนี้ (ถ้ามี) ก่อน
-    for m in call("GET", API + "/richmenu/list", token).get("richmenus", []):
-        if m.get("name") == NAME:
-            call("DELETE", API + "/richmenu/" + m["richMenuId"], token)
-    url = dashboard_url()
+def install(token, url, bar="เมนูบอทเทรด"):
+    """สร้างริชเมนูใหม่ (ข้อความบนแถบ = bar) ตั้งเป็นค่าเริ่มต้น แล้วค่อยลบของเก่า (ไม่มีช่วงที่เมนูหาย)"""
+    old = [m["richMenuId"] for m in call("GET", API + "/richmenu/list", token).get("richmenus", []) if m.get("name") == NAME]
     cw, ch = W // 3, 620  # 6 ปุ่มบน 2 แถว + แถบเปิดแดชบอร์ดด้านล่าง (ต้องตรงกับรูป richmenu.png)
     areas = [{"bounds": {"x": (i % 3) * cw, "y": (i // 3) * ch, "width": cw, "height": ch},
               "action": {"type": "message", "text": t}} for i, t in enumerate(BUTTONS)]
     areas.append({"bounds": {"x": 0, "y": 2 * ch, "width": W, "height": H - 2 * ch},
                   "action": {"type": "uri", "label": "แดชบอร์ด", "uri": url}})
     menu = {"size": {"width": W, "height": H}, "selected": True, "name": NAME,
-            "chatBarText": "เมนูบอทเทรด", "areas": areas}
+            "chatBarText": bar[:14], "areas": areas}
     rid = call("POST", API + "/richmenu", token, menu)["richMenuId"]
     with open(os.path.join(HERE, "richmenu.png"), "rb") as f:
         call("POST", DATA_API + "/richmenu/%s/content" % rid, token, f.read(), "image/png")
     call("POST", API + "/user/all/richmenu/" + rid, token)
+    for o in old:
+        try:
+            call("DELETE", API + "/richmenu/" + o, token)
+        except RuntimeError:
+            pass
+    return rid
+
+
+def set_bar(token, text):
+    """เปลี่ยนข้อความบนแถบเมนูใต้แชทเป็นสถานะบอท (เรียกจากบอททุก ~15 นาที)"""
+    url = dashboard_url(strict=False)
+    if not url:
+        raise RuntimeError("หาลิงก์แดชบอร์ดไม่เจอ")
+    return install(token, url, text)
+
+
+def main():
+    token = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
+    if not token:
+        sys.exit("❌ ยังไม่ได้ตั้ง LINE_CHANNEL_ACCESS_TOKEN (manage.sh ข้อ 11)")
+    url = dashboard_url()
+    try:
+        install(token, url)
+    except RuntimeError as e:
+        sys.exit("❌ %s" % e)
     print("✅ ติดตั้งริชเมนูแล้ว ปิดแชท OA แล้วเปิดใหม่จะเห็นเมนูด้านล่าง")
     print("   ปุ่มแดชบอร์ดเปิด: %s (ต้องเปิดแอป Tailscale ในมือถือก่อน)" % url)
 

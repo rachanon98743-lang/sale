@@ -32,6 +32,8 @@ while true; do
   echo "14) ดูคู่เหรียญทั้งหมดที่กระดานเปิดให้บอทเทรด"
   echo "15) Binance TH: เลือกเทรดคู่ THB (~11 เหรียญ) หรือคู่ USDT (~380 เหรียญ)"
   echo "16) ติดตั้งริชเมนู LINE ใหม่ (มีปุ่มเปิดแดชบอร์ด)"
+  echo "17) ตรวจ/ซ่อม LINE (กดปุ่มในแชทแล้วบอทไม่ตอบ)"
+  echo "18) ตั้งแจ้งเตือนเมื่อ VPS ดับทั้งเครื่อง (healthchecks.io)"
   echo " 0) ออก"
   read -r -p "เลือก: " c
   case "$c" in
@@ -130,6 +132,13 @@ PY2
         echo "   2) เปิดสวิตช์ Use webhook"
         echo "   3) LINE Official Account features: ปิด Auto-reply messages และ Greeting messages"
         echo "   แล้วลองพิมพ์ 'สถานะ' ในแชท LINE OA" ;;
+    17) grep -q '^LINE_CHANNEL_SECRET=' "$ENV" || { echo "ต้องทำข้อ 13 (ใส่ Channel secret) ก่อน"; continue; }
+        ( set -a; . "$ENV"; set +a; cd "$DIR" && python3 line_bot.py ) ;;
+    18) echo "สมัครฟรีที่ healthchecks.io → Add Check (Period 5 นาที, Grace 5 นาที) → คัดลอก Ping URL"
+        echo "แล้วไปที่ Integrations ตั้งช่องทางแจ้งเตือน (อีเมล/แอป) ดูวิธีใน README หัวข้อ แจ้งเตือนเมื่อ VPS ดับ"
+        read -r -p "Ping URL (https://hc-ping.com/...): " u
+        case "$u" in https://*) setvar HEALTHCHECK_URL "$u"; systemctl restart tradingbot; echo "บันทึกแล้ว" ;;
+          *) echo "ยกเลิก" ;; esac ;;
     0) exit 0 ;;
   esac
 done

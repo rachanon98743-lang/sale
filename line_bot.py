@@ -19,19 +19,26 @@ import hashlib
 import hmac
 import json
 import os
+import subprocess
 import threading
 import time
+import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from departments import RISK_PROFILES, now_th
 
 REPLY_URL = "https://api.line.me/v2/bot/message/reply"
-HELP = """📋 คำสั่งที่ใช้ได้
+API = "https://api.line.me/v2/bot"
+HELP = """📋 คำสั่งที่ใช้ได้ (กดปุ่มด้านล่างแชทได้เลย)
 • สถานะ – มูลค่าพอร์ต กำไร โหมด
+• แผนก – งานล่าสุดของทุกแผนก (แตะดูทีละแผนก)
+• ไม่อนุมัติ – เหรียญที่ไม่ซื้อ พร้อมเหตุผลของแต่ละฝ่าย
+• คาดการณ์ – ไม้ที่ถือ ถ้าถึงเป้า/โดนตัด ได้เสียเท่าไร
 • แดชบอร์ด – ลิงก์เปิดหน้าแดชบอร์ด (เปิด Tailscale ก่อน)
 • ไม้ที่ถือ – เหรียญที่ถืออยู่ + กำไร/ขาดทุนตอนนี้
 • สรุปวันนี้ – ซื้อขายวันนี้ + ค่า AI
+• ตรวจไลน์ – ตรวจ/ซ่อมการเชื่อมต่อ LINE
 • หยุด – หยุดเปิดไม้ใหม่ (ไม้เดิมยังเฝ้าอยู่)
 • เริ่ม – กลับมาเปิดไม้ใหม่
 • ขาย BTC – ขายเหรียญนั้น (ต้องยืนยัน)
@@ -41,6 +48,34 @@ HELP = """📋 คำสั่งที่ใช้ได้
 
 def _n(x):
     return "{:,.2f}".format(x) if x >= 100 else "%.6g" % x
+
+
+DEPTS = [("👔", "CEO", ("ceo", "ซีอีโอ")),
+         ("🔎", "ฝ่ายวิจัยตลาด", ("ฝ่ายวิจัย", "วิจัย", "วิจัยตลาด")),
+         ("♟️", "ฝ่ายกลยุทธ์", ("กลยุทธ์",)),
+         ("🧠", "ฝ่ายนักวิเคราะห์ AI", ("ai", "นักวิเคราะห์", "ฝ่ายai", "นักวิเคราะห์ai")),
+         ("🛡️", "ฝ่ายบริหารความเสี่ยง", ("ความเสี่ยง", "บริหารความเสี่ยง", "ฝ่ายความเสี่ยง")),
+         ("⚡", "ฝ่ายเทรด", ("เทรด",)),
+         ("📒", "ฝ่ายบัญชี", ("บัญชี",))]
+SHORT = {"CEO": "CEO", "ฝ่ายวิจัยตลาด": "วิจัย", "ฝ่ายกลยุทธ์": "กลยุทธ์", "ฝ่ายนักวิเคราะห์ AI": "AI",
+         "ฝ่ายบริหารความเสี่ยง": "ความเสี่ยง", "ฝ่ายเทรด": "เทรด", "ฝ่ายบัญชี": "บัญชี"}
+MAIN_QR = ["สถานะ", "แผนก", "ไม่อนุมัติ", "คาดการณ์", "ไม้ที่ถือ", "สรุปวันนี้", "แดชบอร์ด", "ช่วยเหลือ"]
+
+
+def dept_of(t):
+    for icon, name, alias in DEPTS:
+        if t in (name.replace(" ", "").lower(),) + alias:
+            return icon, name
+    return None
+
+
+def _ago(iso):
+    try:
+        from datetime import datetime
+        s = (now_th() - datetime.fromisoformat(iso)).total_seconds()
+    except Exception:
+        return ""
+    return "เมื่อสักครู่" if s < 60 else "%d นาทีที่แล้ว" % (s // 60) if s < 3600 else "%d ชม.ที่แล้ว" % (s // 3600)
 
 
 class LineBot:
@@ -60,9 +95,13 @@ class LineBot:
         mac = hmac.new(self.secret.encode(), body, hashlib.sha256).digest()
         return hmac.compare_digest(base64.b64encode(mac).decode(), signature or "")
 
-    def reply(self, reply_token, text):
-        body = json.dumps({"replyToken": reply_token,
-                           "messages": [{"type": "text", "text": text[:4900]}]}).encode()
+    def reply(self, reply_token, text, quick=None):
+        msg = {"type": "text", "text": text[:4900]}
+        items = quick if quick is not None else MAIN_QR
+        if items:  # ปุ่มลัดใต้ข้อความ กดแล้วส่งคำสั่งทันที (ตอบกลับฟรี ไม่กินโควตา)
+            msg["quickReply"] = {"items": [{"type": "action", "action": {"type": "message", "label": q[:20], "text": q}}
+                                           for q in items[:13]]}
+        body = json.dumps({"replyToken": reply_token, "messages": [msg]}).encode()
         req = urllib.request.Request(REPLY_URL, data=body, method="POST", headers={
             "Authorization": "Bearer " + self.token, "Content-Type": "application/json"})
         try:
@@ -71,6 +110,9 @@ class LineBot:
             self.co.log("CEO", "ตอบ LINE ไม่สำเร็จ: %s" % e)
 
     def handle_events(self, payload):
+        if payload.get("events"):
+            self.last_webhook = time.time()
+            self.co.acct.set("line_last_webhook", now_th().isoformat(timespec="seconds"))
         for ev in payload.get("events", []):
             if ev.get("source", {}).get("userId") != self.owner:
                 continue  # ไม่ใช่เจ้าของ: เงียบ
@@ -82,11 +124,14 @@ class LineBot:
             threading.Thread(target=self._run, args=(text, token), daemon=True).start()
 
     def _run(self, text, token):
+        quick = None
         try:
             out = self.command(text)
+            if isinstance(out, tuple):
+                out, quick = out
         except Exception as e:
             out = "⚠️ ทำคำสั่งไม่สำเร็จ: %s" % e
-        self.reply(token, out)
+        self.reply(token, out, quick)
 
     # ---------------------------------------------------------------- commands
     def command(self, text):
@@ -95,6 +140,17 @@ class LineBot:
         co.log("CEO", "ได้รับคำสั่งจาก LINE: %s" % text[:80])
         if t in ("ช่วยเหลือ", "help", "เมนู", "คำสั่ง", "?"):
             return HELP
+        if t in ("แผนก", "ทุกแผนก", "ฝ่าย", "การทำงาน", "งาน"):
+            return self.depts_text()
+        d = dept_of(t)
+        if d:
+            return self.dept_text(*d)
+        if t in ("ไม่อนุมัติ", "เหตุผล", "ปฏิเสธ", "ทำไมไม่ซื้อ", "ไม่ซื้อ"):
+            return self.rejections_text()
+        if t in ("คาดการณ์", "พยากรณ์", "forecast", "คาดการ"):
+            return self.forecast_text()
+        if t in ("ตรวจไลน์", "ซ่อมไลน์", "ตรวจline", "doctor"):
+            return "\n".join(("✅ " if ok else "❌ ") + m for ok, m in doctor(self, fix=True))
         if t in ("แดชบอร์ด", "dashboard", "เว็บ", "ลิงก์"):
             return self.dashboard_text()
         if t in ("สถานะ", "status", "พอร์ต", "พอร์ท"):
@@ -125,10 +181,56 @@ class LineBot:
             return "หาลิงก์แดชบอร์ดไม่เจอ: ตั้ง DASHBOARD_URL ใน /root/bot.env"
         return "📊 แดชบอร์ด\n%s\n\n(ตั้ง VPN On Demand ในแอป Tailscale ไว้ จะเปิดได้ทันทีไม่ต้องกดเปิด Tailscale)" % url
 
+    def depts_text(self):
+        act = self.co.acct.dept_activity()
+        lines = ["🏢 งานล่าสุดของแต่ละแผนก (แตะปุ่มด้านล่างเพื่อดูละเอียด)"]
+        for icon, name, _ in DEPTS:
+            a = act.get(name)
+            if not a:
+                lines.append("\n⚪ %s %s\nยังไม่ทำงานวันนี้" % (icon, name))
+                continue
+            fresh = _ago(a["t"])
+            lines.append("\n%s %s %s · วันนี้ %d งาน · %s\n%s" % (
+                "🟢" if "นาที" in fresh and int(fresh.split()[0]) < 20 or fresh == "เมื่อสักครู่" else "🟡",
+                icon, name, a["today"], fresh, a["last"][:160]))
+        return "\n".join(lines), [SHORT[n] for _, n, _ in DEPTS] + ["ไม่อนุมัติ", "สถานะ"]
+
+    def dept_text(self, icon, name):
+        rows = self.co.acct.dept_logs(name, 12)
+        if not rows:
+            return "%s %s ยังไม่มีงาน" % (icon, name)
+        out = ["%s %s · งานล่าสุด" % (icon, name)]
+        for r in rows:
+            out.append("%s %s" % (r["t"][11:16], r["msg"][:300]))
+        text = "\n".join(out)
+        return text[:4800], [SHORT[n] for _, n, _ in DEPTS if n != name] + ["แผนก", "สถานะ"]
+
+    def rejections_text(self):
+        rows = self.co.acct.recent_decisions(15, only_rejected=True)
+        if not rows:
+            return "ยังไม่มีเหรียญที่ถูกปฏิเสธ"
+        out = ["🚫 เหรียญที่ไม่ซื้อล่าสุด + เหตุผล"]
+        for r in rows:
+            out.append("\n%s %s · %s\n%s" % (r["t"][11:16], r["symbol"], r["dept"], r["reason"][:250]))
+        return "\n".join(out)[:4800]
+
+    def forecast_text(self):
+        f = self.co.forecast()
+        q = self.co.ex.quote
+        if not f["positions"]:
+            return "ยังไม่มีไม้ที่ถืออยู่ ไม่มีอะไรให้คาดการณ์\nสถิติที่ผ่านมา: ชนะ %.0f%% จาก %d ไม้" % (f["win_rate"], f["trades"])
+        out = ["📐 คาดการณ์ไม้ที่ถือ (ประเมินจากสถิติ ไม่ใช่การรับประกัน)"]
+        for r in f["positions"]:
+            out.append("\n%s ตอนนี้ %+.2f\n  ถึงเป้า %+.2f · โดนตัด %+.2f\n  โอกาสถึงเป้า ~%.0f%% → คาดหวัง %+.2f" % (
+                r["symbol"], r["pnl_now"], r["if_tp"], r["if_sl"], r["p_win"] * 100, r["expected"]))
+        out.append("\nรวมทุกไม้: คาดหวัง %+.2f %s\nดีสุด (ถึงเป้าหมด) %+.2f · แย่สุด (โดนตัดหมด) %+.2f" % (
+            f["expected"], q, f["best"], f["worst"]))
+        return "\n".join(out)
+
     def status_text(self):
         co = self.co
         s = co.acct.summary()
-        eq = co.equity()
+        eq = co.equity_cached()
         q = co.ex.quote
         return ("📊 สถานะ\nกระดาน: %s · %s\nความเสี่ยง: %s · ตลาด: %s\nมูลค่าพอร์ต: %.2f %s\nเงินสด: %.2f %s\n"
                 "กำไรที่ปิดแล้ว: %+.2f\nชนะ %d/%d ไม้ (%.0f%%) · ถืออยู่ %d ไม้%s") % (
@@ -195,16 +297,16 @@ class LineBot:
         ai = self.co.ai
         if not ai.enabled:
             return "🧠 AI ปิดอยู่ หรือยังไม่ได้ใส่ Claude API key\n\n" + HELP
-        if hasattr(ai, "budget_status") and ai.budget_status()[2]:
+        if ai.budget_status()[2]:
             return "🧠 วันนี้/เดือนนี้ใช้งบ AI ครบเพดานแล้ว ปรับได้ในแดชบอร์ด\n\n" + HELP
-        logs = self.co.acct.recent_logs(15)
+        logs = self.co.acct.recent_logs(25)
         ctx = "%s\n\n%s\n\nบันทึกล่าสุด:\n%s" % (
             self.status_text(), self.positions_text(),
             "\n".join("%s %s: %s" % (l["t"][11:16], l["dept"], l["msg"]) for l in reversed(logs)))
         prompt = ("คุณคือผู้ช่วยของบอทเทรดคริปโตอัตโนมัติ ตอบเจ้าของผ่าน LINE เป็นภาษาไทย สั้น กระชับ อ่านง่ายบนมือถือ "
                   "ใช้ข้อมูลจริงด้านล่างเท่านั้น ห้ามรับประกันกำไร ห้ามแนะนำเพิ่มความเสี่ยงหรือใช้เลเวอเรจ "
                   "คุณสั่งซื้อขายเองไม่ได้ ถ้าเจ้าของอยากให้ทำอะไร ให้บอกคำสั่งที่พิมพ์ได้: "
-                  "สถานะ, ไม้ที่ถือ, สรุปวันนี้, หยุด, เริ่ม, ขาย <เหรียญ>, ขายหมด\n\n"
+                  "สถานะ, แผนก, ไม่อนุมัติ, คาดการณ์, ไม้ที่ถือ, สรุปวันนี้, หยุด, เริ่ม, ขาย <เหรียญ>, ขายหมด\n\n"
                   "ข้อมูลตอนนี้:\n%s\n\nคำถาม: %s") % (ctx, question[:1000])
         try:
             return "🧠 " + ai._call(prompt, max_tokens=600, purpose="ตอบคำถามใน LINE").strip()
@@ -212,8 +314,139 @@ class LineBot:
             return "🧠 ถาม AI ไม่สำเร็จ: %s" % e
 
 
+# ====================================================================== ตรวจ/ซ่อมการเชื่อมต่อ LINE อัตโนมัติ
+def _line_api(bot, method, path, body=None):
+    req = urllib.request.Request(API + path, method=method, data=json.dumps(body).encode() if body is not None else None,
+                                 headers={"Authorization": "Bearer " + bot.token, "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            raw = r.read()
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        raise RuntimeError("LINE ตอบ HTTP %s: %s" % (e.code, e.read().decode(errors="replace")[:200]))
+
+
+def _ts(*args, timeout=25):
+    return subprocess.run(["tailscale"] + list(args), capture_output=True, text=True, timeout=timeout)
+
+
+def _funnel_ok(port):
+    try:
+        st = json.loads(_ts("funnel", "status", "--json").stdout or "{}")
+    except Exception:
+        return False
+    allow = any(st.get("AllowFunnel", {}).values())
+    proxies = json.dumps(st.get("Web", {}))
+    return allow and (":%d" % port) in proxies
+
+
+def doctor(bot, fix=True):
+    """ไล่ตรวจทุกจุดที่ทำให้ LINE กดแล้วบอทเงียบ แล้วซ่อมที่ซ่อมเองได้ คืนรายการ (ผ่านไหม, ข้อความ)"""
+    out, port = [], bot.port
+    # 1) ตัวรับ webhook ในเครื่องยังทำงานไหม
+    try:
+        body = b'{"events":[]}'
+        sig = base64.b64encode(hmac.new(bot.secret.encode(), body, hashlib.sha256).digest()).decode()
+        urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:%d/line/webhook" % port, data=body, method="POST",
+                               headers={"X-Line-Signature": sig, "Content-Type": "application/json"}), timeout=5).read()
+        out.append((True, "ตัวรับข้อความ LINE ในเครื่องทำงาน (พอร์ต %d)" % port))
+    except Exception as e:
+        out.append((False, "ตัวรับข้อความ LINE ในเครื่องไม่ตอบ: %s" % e))
+    # 2) ชื่อเครื่องบน Tailscale
+    try:
+        st = json.loads(_ts("status", "--json").stdout)
+        host = (st.get("Self", {}).get("DNSName") or "").rstrip(".")
+    except Exception as e:
+        out.append((False, "เรียก tailscale ไม่ได้: %s" % e))
+        return out
+    if not host:
+        out.append((False, "ยังไม่ได้เปิด MagicDNS/HTTPS ใน Tailscale (admin console → DNS)"))
+        return out
+    expected = "https://%s/line/webhook" % host
+    # 3) Funnel (ทางเข้าจากอินเทอร์เน็ตให้ LINE ส่งข้อความเข้ามา)
+    if _funnel_ok(port):
+        out.append((True, "Tailscale Funnel เปิดอยู่ → พอร์ต %d" % port))
+    elif fix:
+        r = _ts("funnel", "--bg", "--yes", str(port))
+        if r.returncode != 0 and "yes" in (r.stderr or ""):
+            r = _ts("funnel", "--bg", str(port))
+        txt = (r.stdout or "") + (r.stderr or "")
+        if _funnel_ok(port):
+            out.append((True, "Funnel หลุดอยู่ เปิดใหม่ให้แล้ว → พอร์ต %d" % port))
+        elif "login.tailscale.com" in txt or "https://" in txt:
+            link = [w for w in txt.split() if w.startswith("https://")]
+            out.append((False, "ต้องกดอนุญาต Funnel ครั้งเดียว เปิดลิงก์นี้: %s" % (link[0] if link else txt[:200])))
+        else:
+            out.append((False, "เปิด Funnel ไม่สำเร็จ: %s" % txt.strip()[:200]))
+    else:
+        out.append((False, "Tailscale Funnel ไม่ได้เปิด"))
+    # 4) Webhook URL ใน LINE ตรงกับเครื่องนี้ไหม (แก้ให้อัตโนมัติผ่าน API)
+    try:
+        info = _line_api(bot, "GET", "/channel/webhook/endpoint")
+        if info.get("endpoint") != expected:
+            if fix:
+                _line_api(bot, "PUT", "/channel/webhook/endpoint", {"endpoint": expected})
+                out.append((True, "แก้ Webhook URL ใน LINE เป็น %s แล้ว (เดิม %s)" % (expected, info.get("endpoint") or "ว่าง")))
+            else:
+                out.append((False, "Webhook URL ไม่ตรง: %s" % info.get("endpoint")))
+        else:
+            out.append((True, "Webhook URL ถูกต้อง"))
+        if not info.get("active"):
+            out.append((False, "สวิตช์ Use webhook ใน LINE ปิดอยู่: เข้า developers.line.biz → channel → Messaging API → เปิด Use webhook"))
+        # 5) ให้ LINE ลองยิงจริงจากอินเทอร์เน็ต
+        t = _line_api(bot, "POST", "/channel/webhook/test", {"endpoint": expected})
+        if t.get("success"):
+            out.append((True, "LINE ทดสอบส่งเข้าบอทสำเร็จ"))
+        else:
+            out.append((False, "LINE ส่งเข้าบอทไม่ได้: %s %s %s" % (t.get("statusCode", ""), t.get("reason", ""), t.get("detail", ""))))
+    except Exception as e:
+        out.append((False, "ตรวจกับ LINE ไม่ได้: %s" % e))
+    return out
+
+
+def doctor_loop(bot):
+    """ตรวจตอนเปิดบอท แล้วทุก 30 นาที ถ้าพังแล้วซ่อมเองไม่ได้ แจ้งเจ้าของทาง LINE (ไม่เกิน 6 ชม.ครั้ง)"""
+    time.sleep(20)
+    while True:
+        try:
+            res = doctor(bot, fix=True)
+            bad = [m for ok, m in res if not ok]
+            fixed = [m for ok, m in res if ok and ("ให้แล้ว" in m or "แก้ " in m)]
+            bot.health = {"t": now_th().isoformat(timespec="seconds"), "ok": not bad, "items": res}
+            for m in fixed + bad:
+                bot.co.log("CEO", "LINE: " + m)
+            if bad:
+                bot.co.line.send("⚠️ ปุ่มในแชท LINE อาจกดแล้วบอทไม่ตอบ\n" + "\n".join("• " + m for m in bad),
+                                 key="line_doctor", every_sec=6 * 3600, urgent=True)
+        except Exception as e:
+            bot.co.log("CEO", "ตรวจ LINE ไม่สำเร็จ: %s" % e)
+        time.sleep(1800)
+
+
+def status_bar_loop(bot, every_min):
+    """อัปเดตข้อความบนแถบริชเมนู (ใต้แชท) เป็นสถานะบอท เช่น '🟢15:40 +1.2%' (ไม่กินโควตาข้อความ)
+    ถ้าเวลาบนแถบเก่ากว่ารอบอัปเดตมาก แปลว่าบอทหยุดทำงาน"""
+    import richmenu
+    time.sleep(60)
+    while True:
+        try:
+            co = bot.co
+            eq = co.equity_cached()
+            day0 = co.acct.get("day_start_" + now_th().date().isoformat()) or eq
+            chg = (eq / day0 - 1) * 100 if day0 else 0
+            icon = "⏸" if os.path.exists("STOP") else "🟢"
+            richmenu.set_bar(bot.token, "%s%s %+.1f%%" % (icon, now_th().strftime("%H:%M"), chg))
+        except BaseException as e:  # richmenu ใช้ sys.exit เวลา error: ห้ามให้ thread ตาย
+            bot.co.log("CEO", "อัปเดตแถบสถานะริชเมนูไม่ได้: %s" % e)
+        time.sleep(every_min * 60)
+
+
 def serve(company, port=8090):
     bot = LineBot(company)
+    bot.port = port
+    bot.health = None
+    bot.last_webhook = 0
+    company.line_bot = bot
     if not bot.ready:
         return None
 
@@ -264,5 +497,21 @@ def serve(company, port=8090):
                 company.log("CEO", "อ่าน webhook LINE ไม่ได้: %s" % e)
 
     company.log("CEO", "เปิดรับคำสั่งจาก LINE ที่พอร์ต %d" % port)
-    threading.Thread(target=ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever, daemon=True).start()
+    srv = ThreadingHTTPServer(("127.0.0.1", port), H)
+    company.keep_thread("รับคำสั่ง LINE", srv.serve_forever)
+    threading.Thread(target=doctor_loop, args=(bot,), daemon=True).start()
+    every = int(company.cfg.get("line_status_bar_min", 15))
+    if every > 0:
+        threading.Thread(target=status_bar_loop, args=(bot, every), daemon=True).start()
     return bot
+
+
+if __name__ == "__main__":  # python3 line_bot.py  = ตรวจ/ซ่อมการเชื่อมต่อ LINE (manage.sh ข้อ 17)
+    b = LineBot.__new__(LineBot)
+    b.token = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
+    b.secret = os.environ.get("LINE_CHANNEL_SECRET", "").strip()
+    b.port = 8090
+    if not (b.token and b.secret):
+        raise SystemExit("❌ ยังไม่ได้ตั้ง LINE token / Channel secret (manage.sh ข้อ 11 และ 13)")
+    for ok, m in doctor(b, fix=True):
+        print(("✅ " if ok else "❌ ") + m)

@@ -2,3 +2,4 @@
 STOP
 __pycache__/
 line_state.json
+heartbeat.json
