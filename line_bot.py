@@ -395,10 +395,15 @@ def doctor(bot, fix=True):
             out.append((False, "สวิตช์ Use webhook ใน LINE ปิดอยู่: เข้า developers.line.biz → channel → Messaging API → เปิด Use webhook"))
         # 5) ให้ LINE ลองยิงจริงจากอินเทอร์เน็ต
         t = _line_api(bot, "POST", "/channel/webhook/test", {"endpoint": expected})
+        recent = time.time() - getattr(bot, "last_webhook", 0) < 6 * 3600
         if t.get("success"):
             out.append((True, "LINE ทดสอบส่งเข้าบอทสำเร็จ"))
+        elif recent:  # ปุ่มทดสอบของ LINE บางครั้งต่อ HTTPS ของ Funnel ไม่ติด แต่ข้อความจริงเข้าได้ ไม่ต้องเตือน
+            out.append((True, "ข้อความจริงจากแชทเข้าบอทได้ปกติ (ล่าสุด %s) ปุ่มทดสอบของ LINE ไม่ผ่านไม่เป็นไร" %
+                        time.strftime("%H:%M", time.localtime(bot.last_webhook))))
         else:
-            out.append((False, "LINE ส่งเข้าบอทไม่ได้: %s %s %s" % (t.get("statusCode", ""), t.get("reason", ""), t.get("detail", ""))))
+            out.append((False, "LINE ส่งเข้าบอทไม่ได้: %s %s %s (ลองกดปุ่มในแชท ถ้าบอทตอบ = ใช้ได้)" % (
+                t.get("statusCode", ""), t.get("reason", ""), t.get("detail", ""))))
     except Exception as e:
         out.append((False, "ตรวจกับ LINE ไม่ได้: %s" % e))
     return out
@@ -435,7 +440,11 @@ def status_bar_loop(bot, every_min):
             day0 = co.acct.get("day_start_" + now_th().date().isoformat()) or eq
             chg = (eq / day0 - 1) * 100 if day0 else 0
             icon = "⏸" if os.path.exists("STOP") else "🟢"
-            richmenu.set_bar(bot.token, "%s%s %+.1f%%" % (icon, now_th().strftime("%H:%M"), chg))
+            bar = "%s%s %+.1f%%" % (icon, now_th().strftime("%H:%M"), chg)
+            richmenu.set_bar(bot.token, bar)
+            if not getattr(bot, "bar_ok", False):
+                bot.bar_ok = True
+                bot.co.log("CEO", "อัปเดตแถบใต้แชท LINE เป็น '%s' แล้ว (ปิดแชทแล้วเปิดใหม่ถึงจะเห็น)" % bar)
         except BaseException as e:  # richmenu ใช้ sys.exit เวลา error: ห้ามให้ thread ตาย
             bot.co.log("CEO", "อัปเดตแถบสถานะริชเมนูไม่ได้: %s" % e)
         time.sleep(every_min * 60)
