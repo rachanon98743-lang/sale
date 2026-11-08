@@ -29,6 +29,7 @@ while true; do
   echo "11) ตั้งแจ้งเตือนเข้า LINE"
   echo "12) ส่งข้อความทดสอบเข้า LINE"
   echo "13) เปิดสั่งงานผ่านแชท LINE + ติดตั้งริชเมนู"
+  echo "14) ดูคู่เหรียญทั้งหมดที่กระดานเปิดให้บอทเทรด"
   echo " 0) ออก"
   read -r -p "เลือก: " c
   case "$c" in
@@ -95,6 +96,7 @@ PY
         ( set -a; . "$ENV"; set +a; cd "$DIR" && python3 main.py --test-line )
         systemctl restart tradingbot; echo "บันทึกแล้ว และรีสตาร์ทบอทแล้ว" ;;
     12) ( set -a; . "$ENV"; set +a; cd "$DIR" && python3 main.py --test-line ) ;;
+    14) ( cd "$DIR" && python3 main.py --markets ) ;;
     13) grep -q '^LINE_CHANNEL_ACCESS_TOKEN=' "$ENV" || { echo "ต้องทำข้อ 11 (ตั้ง LINE) ก่อน"; continue; }
         echo "Channel secret อยู่ที่ developers.line.biz → channel → Basic settings"
         read -r -p "Channel secret: " sec

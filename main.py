@@ -248,6 +248,7 @@ def main():
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--check", action="store_true", help="ตรวจการเชื่อมต่อกระดานและยอดเงิน โดยไม่ซื้อขาย")
     ap.add_argument("--exchange", choices=["binance", "binance_th"])
+    ap.add_argument("--markets", action="store_true", help="แสดงคู่เหรียญทั้งหมดที่ API เปิดให้")
     ap.add_argument("--test-line", action="store_true", help="ส่งข้อความทดสอบเข้า LINE")
     ap.add_argument("--host", default="127.0.0.1", help="0.0.0.0 = เปิดให้เครื่องอื่นเข้าได้ (ต้องตั้ง DASHBOARD_PASSWORD)")
     a = ap.parse_args()
@@ -259,6 +260,11 @@ def main():
         cfg["risk"] = a.risk
     if a.exchange:
         cfg["exchange"] = a.exchange
+    if a.markets:
+        ex = Binance("paper", exchange=cfg.get("exchange", "binance"), quote=cfg.get("quote"))
+        for k, v in ex.list_markets().items():
+            print("%s => %s" % (k, v))
+        return
     if a.test_line:
         n = LineNotifier(cfg)
         if not n.enabled:

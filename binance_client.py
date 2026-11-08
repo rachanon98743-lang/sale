@@ -283,6 +283,20 @@ class Binance:
             return
         self._request("DELETE", "/api/v3/orderList", {"symbol": symbol, "orderListId": list_id}, signed=True)
 
+    def list_markets(self):
+        """สรุปคู่เหรียญทั้งหมดที่ API ของกระดานเปิดให้ แยกตามสกุลเงินที่ใช้ซื้อและสถานะ (ไม่ซื้อขาย)"""
+        info = self.public("/api/v3/exchangeInfo")
+        groups = {}
+        for s in info.get("symbols", []):
+            k = "%s | %s" % (s.get("quoteAsset", "?"), s.get("status", "?"))
+            groups.setdefault(k, []).append(s.get("baseAsset", s.get("symbol", "?")))
+        out = {"total": len(info.get("symbols", []))}
+        for k in sorted(groups, key=lambda k: -len(groups[k])):
+            out[k] = "%d: %s" % (len(groups[k]), " ".join(sorted(groups[k])))
+        sample = (info.get("symbols") or [{}])[0]
+        out["fields"] = " ".join(sorted(sample))  # ช่องข้อมูลที่ API ส่งมา ไว้ดูว่ามีแยกตลาดไหม
+        return out
+
     def check(self):
         """ตรวจการเชื่อมต่อแบบไม่ส่งคำสั่งซื้อขาย"""
         self.sync_time()
