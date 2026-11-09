@@ -251,9 +251,10 @@ class Company:
         if not self.riskd.can_trade(eq, day0):
             self.log("CEO", "สั่งงานรอบนี้: งดเปิดไม้ใหม่ (หยุดไว้/ขาดทุนถึงเพดาน) เฝ้าไม้ที่ถือ %d ไม้ต่อ" % len(self.acct.open_positions()))
             return
-        self.regime = self.research.market_regime()
+        self.regime = self.research.gold_regime() if self.risk == "gold" else self.research.market_regime()
         if self.regime == "bear" and self.cfg.get("skip_bear_market", True) and self.risk != "high":
-            self.log("CEO", "สั่งงานรอบนี้: ตลาดขาลง (SPY ต่ำกว่า MA200) งดเปิดไม้ใหม่ (ตั้ง skip_bear_market=false เพื่อปิด)")
+            self.log("CEO", "สั่งงานรอบนี้: %s งดเปิดไม้ใหม่ (ตั้ง skip_bear_market=false เพื่อปิด)" % (
+                "ทองขาลง (GLD ต่ำกว่า MA200)" if self.risk == "gold" else "ตลาดขาลง (SPY ต่ำกว่า MA200)"))
             return
         held = {p["symbol"] for p in self.acct.open_positions()}
         self.last_research = self.research.scan(self.risk)

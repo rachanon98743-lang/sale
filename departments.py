@@ -34,6 +34,10 @@ RISK_PROFILES = {
              "max_coins": 100, "size": 0.25, "risk_pct": 0.015, "sl": 0.025, "tp": 0.05, "max_pos": 5, "min_score": 65,
              "every_min": 5, "eod_exit": True, "earn_days": 1},
 }
+# โหมดทอง: เทรด ETF ทอง (GLD/IAU/GLDM) ถือได้ทีละ 1 ไม้ ตามแนวโน้มทอง + ดอลลาร์ + ดอกเบี้ย + ความกลัวของตลาดหุ้น
+RISK_PROFILES["gold"] = {"name": "ทองคำ", "style": "ทองคำ: ตามแนวโน้มทอง + ดอลลาร์อ่อน/ดอกเบี้ยลง/ตลาดกลัว (ถือหลายวัน-สัปดาห์)",
+                         "tf": "1d", "min_dvol_m": 20, "max_coins": 3, "size": 0.6, "risk_pct": 0.01, "sl": 0.04, "tp": 0.10,
+                         "max_pos": 1, "min_score": 65, "every_min": 60, "eod_exit": False, "earn_days": 0}
 TH_MIN_VOL_M = TH_USDT_MIN_VOL_M = {"low": 0, "mid": 0, "high": 0}  # เก็บไว้ให้โค้ดเดิมที่อ้างถึงไม่พัง
 
 def liquidity_check(ex, symbol, amount, max_spread=0.005, max_slip=0.005, ticker=None):
@@ -203,7 +207,17 @@ class ResearchDept:
         trend_up = e20[i] is not None and e50[i] is not None and p > e20[i] > e50[i]
         ext = p / e20[i] - 1 if e20[i] else 0
         score, why = 0, []
-        if risk == "low":
+        if risk == "gold":
+            # ทองเคลื่อนเป็นแนวโน้มยาว: ซื้อเมื่อแนวโน้มขึ้นชัด ทั้งตอนทะลุจุดสูงและตอนย่อในขาขึ้น
+            above200 = s200[i] is not None and p > s200[i]
+            if above200: score += 15; why.append("ทองเหนือ MA200")
+            if e20[i] and e50[i] and e20[i] > e50[i]: score += 15; why.append("EMA20>EMA50")
+            if e20[i] and p > e20[i]: score += 10
+            if p > hi20: score += 15; why.append("ทองทะลุจุดสูง 20 วัน")
+            elif above200 and rr2 < 20: score += 15; why.append("ย่อในขาขึ้น (RSI2 %.0f)" % rr2)
+            if mom > 0: score += 5
+            if r > 78: score -= 15; why.append("RSI %.0f ร้อนเกิน" % r)
+        elif risk == "low":
             # สวิงเทรดแบบ Connors/Raschke: หุ้นอยู่ในขาขึ้นใหญ่ (เหนือ MA200) แล้วย่อลงระยะสั้น = จุดซื้อความเสี่ยงต่ำ
             above200 = s200[i] is not None and p > s200[i]
             if above200: score += 30; why.append("เหนือ MA200 (ขาขึ้นใหญ่)")
@@ -232,10 +246,55 @@ class ResearchDept:
             if r < 82: score += 10
             else: score -= 25
         # กฎนักเทรดมืออาชีพ: ไม่ไล่ราคาที่วิ่งห่างเส้นค่าเฉลี่ยเกิน 3 เท่าของความผันผวน
-        if atr > 0 and ext > max(0.03, atr * 3) and risk != "low":
+        if atr > 0 and ext > max(0.03, atr * 3) and risk not in ("low", "gold"):
             score -= 15
             why.append("ห่าง EMA20 %.1f%% (เสี่ยงไล่ราคา)" % (ext * 100))
         return max(0, min(100, score)), why, {"rsi": r, "rsi2": rr2, "mom": mom, "spike": spike, "trend_up": trend_up, "ext": ext}
+
+    def gold_context(self):
+        """ปัจจัยนอกตลาดที่ขับราคาทอง (ข้อมูลรายวัน): ดอลลาร์ (UUP), พันธบัตร/ดอกเบี้ย (TLT), ความกลัวตลาดหุ้น (SPY)"""
+        from universe import INTERMARKET
+        bars = self.ex.klines_many(list(INTERMARKET.values()), "1d", 120)
+        ctx = {}
+        for name, sym in INTERMARKET.items():
+            k = bars.get(sym) or []
+            if len(k) < 60:
+                continue
+            c = [x[4] for x in k]
+            h = [x[2] for x in k]
+            lo = [x[3] for x in k]
+            ctx[name] = {"price": c[-1], "ema20": ema(c, 20)[-1], "ema50": ema(c, 50)[-1],
+                         "ret10": c[-1] / c[-11] - 1, "ret20": c[-1] / c[-21] - 1, "atr": atr_pct(h, lo, c)}
+        bonus, why = 0, []
+        d = ctx.get("dollar")
+        if d:
+            if d["price"] < d["ema50"] and d["ret20"] < 0:
+                bonus += 20; why.append("ดอลลาร์อ่อน (UUP %+.1f%% 20 วัน)" % (d["ret20"] * 100))
+            elif d["price"] > d["ema50"] and d["ret20"] > 0.01:
+                bonus -= 20; why.append("ดอลลาร์แข็ง (UUP %+.1f%%) กดดันทอง" % (d["ret20"] * 100))
+        b = ctx.get("bonds")
+        if b:
+            if b["ret20"] > 0.01:
+                bonus += 10; why.append("บอนด์ขึ้น = ดอกเบี้ยลด (TLT %+.1f%%)" % (b["ret20"] * 100))
+            elif b["ret20"] < -0.02:
+                bonus -= 10; why.append("ดอกเบี้ยขึ้น (TLT %+.1f%%)" % (b["ret20"] * 100))
+        s = ctx.get("stocks")
+        if s and ((s["price"] < s["ema20"] and s["ret10"] < -0.03) or s["atr"] > 0.018):
+            bonus += 15; why.append("ตลาดหุ้นกลัว (SPY %+.1f%% 10 วัน)" % (s["ret10"] * 100))
+        self.gold_ctx = {"bonus": bonus, "why": why, "data": ctx}
+        self.log(self.name, "ปัจจัยทอง: %s (คะแนนเสริม %+d)" % (" · ".join(why) or "ไม่มีสัญญาณเด่น", bonus))
+        return self.gold_ctx
+
+    def gold_regime(self):
+        """ภาวะของทองเอง (GLD รายวัน): ทองขาลงชัด = ไม่เปิดไม้ใหม่ แม้ตลาดหุ้นจะเป็นอย่างไร"""
+        k = self.ex.klines("GLD", "1d", 260)
+        c = [x[4] for x in k]
+        if len(c) < 200:
+            return "neutral"
+        m50, m200 = sma(c, 50)[-1], sma(c, 200)[-1]
+        regime = "bull" if c[-1] > m50 > m200 else ("bear" if c[-1] < m200 and m50 < m200 else "neutral")
+        self.log(self.name, "แนวโน้มทอง (GLD รายวัน): %s ราคา %.2f MA50 %.2f MA200 %.2f" % (regime, c[-1], m50, m200))
+        return regime
 
     def analyze(self, k, risk, bench_ret=None):
         c = [float(x[4]) for x in k]
@@ -252,7 +311,11 @@ class ResearchDept:
         look = min(63, n)
         ret = c[n] / c[n - look] - 1 if look > 0 and c[n - look] else 0
         rs = ret - bench_ret if bench_ret is not None else 0.0
-        if bench_ret is not None:
+        if risk == "gold":
+            g = getattr(self, "gold_ctx", None) or {"bonus": 0, "why": []}
+            score += g["bonus"]
+            why += g["why"]
+        elif bench_ret is not None:
             if rs > 0.05: score += 10; why.append("แข็งกว่าตลาด %+.0f%%" % (rs * 100))
             elif rs < -0.05 and risk != "low": score -= 10; why.append("อ่อนกว่าตลาด %+.0f%%" % (rs * 100))
         score = max(0, min(100, score))
@@ -266,7 +329,7 @@ class ResearchDept:
         cfg = RISK_PROFILES[risk]
         sl, tp = exit_levels(cfg, atr)
         fee = float(self.cfg.get("fee", 0.001))
-        horizon = int(self.cfg.get("backtest_horizon_bars", {"low": 15, "mid": 60, "high": 26}[risk]))
+        horizon = int(self.cfg.get("backtest_horizon_bars", {"low": 15, "mid": 60, "high": 26, "gold": 40}[risk]))
         n = len(c) - 1
         wins = losses = timeouts = 0
         rets = []
@@ -310,8 +373,13 @@ class ResearchDept:
         max_spread = float(self.cfg.get("max_spread_pct", 0.3)) / 100
         cands, low_vol, wide, cheap = [], 0, 0, 0
         self.tickers = {}
+        from universe import GOLD, GOLD_ONLY
+        if risk == "gold":
+            self.gold_context()
         for t in tick:
             s = t["symbol"]
+            if (risk == "gold") != (s in GOLD) or (risk != "gold" and s in GOLD_ONLY):
+                continue
             if s not in self.ex.filters or s == self.bench and not self.cfg.get("trade_spy", True):
                 continue
             px = float(t["lastPrice"] or 0)
@@ -527,7 +595,8 @@ class AIAnalystDept:
 5) กระจายความเสี่ยง: อย่าอนุมัติหลายตัวในกลุ่ม (sector) เดียวกันพร้อมกัน เลือกตัวที่ดีที่สุดของกลุ่ม
 6) หุ้นกับ ETF ภาวะเดียวกัน (เช่น NVDA กับ SMH/QQQ) ถือว่าเสี่ยงซ้ำกัน
 7) ใช้สถิติผลเทรดจริงของบอท (track_record) แบบไหนแพ้บ่อยให้ระวัง
-8) รักษาเงินต้นสำคัญกว่าทำกำไร: ถ้าไม่แน่ใจ ให้ปฏิเสธ"""
+8) รักษาเงินต้นสำคัญกว่าทำกำไร: ถ้าไม่แน่ใจ ให้ปฏิเสธ
+9) โหมดทอง (sector = Gold): ไม่ใช้ข้อ 1-2 ให้ดูแทนว่าทองอยู่ในขาขึ้นไหม และปัจจัยใน why (ดอลลาร์อ่อน, ดอกเบี้ยลด, ตลาดหุ้นกลัว = หนุนทอง; ดอลลาร์แข็ง/ดอกเบี้ยขึ้น = กดดัน)"""
 
     def review(self, proposals, regime, track=None):
         if not self.enabled or not proposals:

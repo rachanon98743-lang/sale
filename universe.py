@@ -23,8 +23,12 @@ _S = {
 _ETF = {
     "Index": "SPY QQQ IWM DIA",
     "SectorETF": "XLK XLF XLE XLV XLI XLY XLP XLU SMH",
-    "Defensive": "GLD TLT",
+    "Defensive": "TLT",
+    "Gold": "GLD",
 }
+GOLD = ["GLD", "IAU", "GLDM"]       # ETF ทองคำ (โหมด gold เทรดเฉพาะกลุ่มนี้)
+GOLD_ONLY = ["IAU", "GLDM"]         # ตัวซ้ำกับ GLD: โหมดหุ้นไม่สแกน
+INTERMARKET = {"dollar": "UUP", "bonds": "TLT", "stocks": "SPY"}  # ตัวชี้นำราคาทอง
 
 UNIVERSE = {}
 for sec, syms in _S.items():
@@ -33,5 +37,7 @@ for sec, syms in _S.items():
 for sec, syms in _ETF.items():
     for s in syms.split():
         UNIVERSE[s] = (sec, "etf")
+for s in GOLD_ONLY:
+    UNIVERSE[s] = ("Gold", "etf")
 
 BENCHMARK = "SPY"   # ใช้ดูภาวะตลาดรวมและความแข็งแกร่งเทียบตลาด (relative strength)

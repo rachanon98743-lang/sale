@@ -67,8 +67,9 @@ while true; do
     4) echo "low  = สวิงเทรด ซื้อตอนย่อในหุ้นขาขึ้น ถือหลายวัน (เสี่ยง 0.5%/ไม้)"
        echo "mid  = โมเมนตัม หุ้นแข็งกว่าตลาดทะลุฐาน (เสี่ยง 1%/ไม้)"
        echo "high = เทรดระยะสั้น 15 นาที ขายหมดก่อนตลาดปิด (เสี่ยง 1.5%/ไม้)"
-       read -r -p "ระดับ (low/mid/high): " r
-       case "$r" in low|mid|high) cfgset risk "\"$r\""; systemctl restart $SVC_NAME; echo "เปลี่ยนเป็น $r แล้ว" ;;
+       echo "gold = ทองคำ (GLD/IAU/GLDM) ตามแนวโน้มทอง + ดอลลาร์/ดอกเบี้ย/ความกลัว (เสี่ยง 1%/ไม้ ถือทีละ 1)"
+       read -r -p "ระดับ (low/mid/high/gold): " r
+       case "$r" in low|mid|high|gold) cfgset risk "\"$r\""; systemctl restart $SVC_NAME; echo "เปลี่ยนเป็น $r แล้ว" ;;
          *) echo "ไม่ถูกต้อง" ;; esac ;;
     5) journalctl -u $SVC_NAME -n 40 --no-pager ;;
     6) systemctl restart $SVC_NAME; echo "รีสตาร์ทแล้ว" ;;
