@@ -92,6 +92,7 @@ class Snapshot:
                        "calls": co.gemini.calls_today(), "limit": int(co.gemini.setting("gemini_daily_calls", 200)),
                        "veto": int(co.ai.setting("gemini_veto_conf", 80)), "err": co.gemini.last_err},
             "meeting": co.acct.get("last_meeting"),
+            "review": self.review(),
             "activity": co.acct.dept_activity(),
             "line": {"enabled": co.line.enabled, "limit": co.line.monthly_limit,
                      "count": st.get("count", 0) if st.get("month") == time.strftime("%Y-%m") else 0,
@@ -100,6 +101,16 @@ class Snapshot:
                        else ((co.gemini.model if co.gemini.enabled else ("ปิดอยู่" if co.gemini.key else "ยังไม่ใส่ key")) if "Gemini" in n else "")}
                       for i, n in DEPTS],
         }
+
+    def review(self):
+        if time.time() - getattr(self, "rv_t", 0) > 300:  # คำนวณทุก 5 นาที พอ
+            try:
+                from learning import STAGE_TH
+                self.rv = dict(self.co.learning.review(self.co.acct.get("guard_state")), stage_th=STAGE_TH)
+            except Exception as e:
+                self.rv = {"error": str(e)}
+            self.rv_t = time.time()
+        return self.rv
 
     def refresh(self):
         data = self.build()
@@ -176,6 +187,8 @@ tr.click{cursor:pointer}tr.click:active{background:#21262d}
 <div class="card"><h3>🚫 ไม่อนุมัติล่าสุด + เหตุผล</h3><div class="sc" id="dec"></div></div>
 
 <div class="card"><h3>ผลวิจัยล่าสุด <span class="m" style="font-weight:400;font-size:12px">แตะเหรียญเพื่อดูกราฟ + เช็กลิสต์</span></h3><div class="sc"><table><thead><tr><th>เหรียญ</th><th>ราคา</th><th>24ชม.</th><th>RSI</th><th>คะแนน</th><th>จังหวะ</th><th>ย้อนหลังชนะ</th><th>คาดหวัง/ไม้</th></tr></thead><tbody id="res"></tbody></table></div></div>
+
+<div class="card"><h3>📈 ฝ่ายพัฒนากลยุทธ์ <span class="m" style="font-weight:400;font-size:12px">เรียนรู้จากผลที่ผ่านมา · 30 วัน</span></h3><div id="rv"></div></div>
 
 <div class="card"><h3>🤝 ประชุม AI: Gemini + Claude <span class="m" style="font-weight:400;font-size:12px">ควรเทรดตัวไหน</span></h3><div id="gmState" class="m"></div><div id="meet"></div></div>
 
@@ -270,6 +283,15 @@ const A=D.ai,u=A.usage,l=A.limits;
 put('aiState',!A.has_key?'⚪ ยังไม่ได้ใส่ Claude API key (เมนู manage.sh ข้อ 2) บอทใช้กฎอย่างเดียว':!A.enabled?'⚪ ปิด AI อยู่':A.over.length?'🔴 ถึงเพดานแล้ว: '+esc(A.over.join(', '))+' (AI หยุดชั่วคราว)':'🟢 ทำงานอยู่ · รุ่น '+esc(A.model)+' · วันนี้เรียก '+u.day_calls+' ครั้ง');
 put('bars',bar('ค่าใช้จ่ายวันนี้',u.day_usd,l.day_usd,v=>'$'+f(v,4))+bar('ค่าใช้จ่ายเดือนนี้',u.month_usd,l.month_usd,v=>'$'+f(v,4))+bar('token วันนี้',u.day_tokens,l.day_tokens,v=>f(v,0)));
 if(!formLoaded){$('f_en').value=A.enabled_setting?'1':'0';$('f_model').value=A.model;$('f_day').value=l.day_usd;$('f_month').value=l.month_usd;$('f_tok').value=l.day_tokens;$('f_call').value=l.max_tokens_per_call;$('f_gen').value=D.gemini.enabled_setting?'1':'0';$('f_veto').value=D.gemini.veto;formLoaded=true;}
+const RV=D.review||{};if(RV.trades){const T=RV.trades,Gd=RV.guard||{},pc=v=>(v>0?'+':'')+f(v)+'%';
+put('rv',`<div class="kp" style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:8px">`+
+[['ไม้',T.n],['ชนะ',T.win_pct+'%'],['คาดหวัง/ไม้',pc(T.exp)],['PF',f(T.pf)],['DD สูงสุด',f(T.max_dd)+'%'],['แพ้ติดกัน',T.streak]].map(x=>`<div><div class="m" style="font-size:11px">${x[0]}</div><b>${esc(String(x[1]))}</b></div>`).join('')+`</div>`+
+`<div>🛡️ ป้องกันเงินต้น: <b>${esc(Gd.name||'🟢 ปกติ')}</b> · ขนาดไม้ x${Gd.size??1}${(Gd.why||[]).length?' <span class="m">'+esc(Gd.why.join(', '))+'</span>':''}</div>`+
+(Object.keys(RV.stages||{}).length?'<h3 style="margin-top:8px;font-size:14px">🔍 ถ้าซื้อทุกตัวที่แต่ละด่านตัดสิน</h3>'+Object.entries(RV.stages).map(([k,s])=>`<div>${esc(RV.stage_th[k]||k)} ${s.n} ตัว → ชนะ ${s.win_pct}% <span class="${c(s.avg_pct)}">${pc(s.avg_pct)}</span></div>`).join(''):'')+
+((RV.learned||[]).length?'<h3 style="margin-top:8px;font-size:14px">🧪 บอทเรียนรู้ว่า</h3>'+RV.learned.map(x=>`<div>${esc(x.k)} ${esc(x.v)}: ชนะ ${x.win}% <span class="${c(x.avg)}">${pc(x.avg)}</span> <span class="m">(${x.n})</span></div>`).join(''):'')+
+((RV.tips||[]).length?'<h3 style="margin-top:8px;font-size:14px">💡 ข้อเสนอแนะ</h3>'+RV.tips.map(x=>`<div>• ${esc(x)}</div>`).join(''):'')+
+'<h3 style="margin-top:8px;font-size:14px">พร้อมใช้เงินจริง? '+(RV.ready_all?'✅':'ยังไม่ผ่าน')+'</h3>'+RV.ready.map(r=>`<div>${r[1]?'✅':'❌'} ${esc(r[0])} <span class="m">(${esc(r[2])})</span></div>`).join(''));}
+else put('rv','<div class="m">'+esc(RV.error||'กำลังคำนวณ')+'</div>');
 const G=D.gemini,M=D.meeting,GV={buy:'🟢 ควรซื้อ',wait:'🟡 รอก่อน',avoid:'🔴 ไม่ควรแตะ'};
 put('gmState',!G.has_key?'⚪ ยังไม่ได้ใส่ Gemini API key (ฟรี: aistudio.google.com/apikey แล้วเมนู manage.sh ข้อ 20)':!G.enabled?'⚪ ปิด Gemini อยู่':'🟢 Gemini ทำงานอยู่ · รุ่น '+esc(G.model)+' · วันนี้ '+G.calls+'/'+G.limit+' ครั้ง (ฟรี)'+(G.err?' · ⚠️ '+esc(G.err):''));
 put('meet',!M?'<div class="m">ยังไม่มีการประชุม รอรอบที่มีข้อเสนอซื้อ</div>':'<div class="m">ล่าสุด '+esc(M.t.slice(11,16))+' · ตลาด '+esc(M.regime||'')+(M.market?' · '+esc(M.market):'')+'</div>'+Object.entries(M.views||{}).map(([s,v])=>`<div><b>${esc(s)}</b> ${GV[v.view]||esc(v.view)} ${v.confidence}% <span class="m">${esc(v.reason)}</span></div>`).join('')+((M.minutes||[]).length?'<h3 style="margin-top:8px;font-size:14px">ผลตัดสินร่วมกับ Claude</h3>'+M.minutes.map(x=>`<div>${esc(x)}</div>`).join(''):'')+((M.watch||[]).length?'<h3 style="margin-top:8px;font-size:14px">👀 น่าจับตา (ยังไม่ซื้อ)</h3>'+M.watch.map(w=>`<div><b>${esc(w.symbol)}</b> <span class="m">${esc(w.reason)}</span></div>`).join(''):''));
@@ -301,7 +323,7 @@ $('ltest').onclick=async()=>{$('lmsg').textContent='กำลังส่ง...'
 load();
 </script></body></html>"""
 
-DEPTS = [("👔", "CEO"), ("🔎", "ฝ่ายวิจัยตลาด"), ("♟️", "ฝ่ายกลยุทธ์"), ("🧠", "ฝ่ายนักวิเคราะห์ AI"), ("♊", "ฝ่ายวิเคราะห์ Gemini"),
+DEPTS = [("👔", "CEO"), ("🔎", "ฝ่ายวิจัยตลาด"), ("♟️", "ฝ่ายกลยุทธ์"), ("🧠", "ฝ่ายนักวิเคราะห์ AI"), ("♊", "ฝ่ายวิเคราะห์ Gemini"), ("📈", "ฝ่ายพัฒนากลยุทธ์"),
          ("🛡️", "ฝ่ายบริหารความเสี่ยง"), ("⚡", "ฝ่ายเทรด"), ("📒", "ฝ่ายบัญชี")]
 SETTINGS = {  # ชื่อ: (ชนิด, ต่ำสุด, สูงสุด)
     "ai_enabled": (bool, None, None), "ai_model": (str, None, None),

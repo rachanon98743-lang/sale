@@ -26,6 +26,7 @@ from departments import (RISK_PROFILES, AccountingDept, AIAnalystDept, Execution
 import dashboard
 from notifier import LineNotifier
 import line_bot
+from learning import LearningDept
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -59,6 +60,8 @@ class Company:
         self.strategy = StrategyDept(self.log, self.acct, cfg)
         self.ai = AIAnalystDept(cfg, self.acct, self.log)
         self.gemini = GeminiAnalystDept(cfg, self.acct, self.log)
+        self.learning = LearningDept(self.ex, self.acct, self.log, cfg)
+        self.learning.strategy = self.strategy
         self.riskd = RiskDept(cfg, self.acct, self.log)
         self.exe = ExecutionDept(self.ex, self.acct, self.log, cfg)
         self.regime = "neutral"
@@ -169,6 +172,8 @@ class Company:
         if self.mode != "paper":
             self.log("CEO", "เงิน %s ในบัญชี: %.2f" % (self.ex.quote, self.ex.usdt_free()))
         self.status = "running"
+        # ฝ่ายพัฒนากลยุทธ์: ย้อนดูข้อเสนอในอดีตครั้งแรก (ทำเบื้องหลัง ไม่ถ่วงการเทรด)
+        threading.Thread(target=self.learning.backfill, args=(self.risk,), daemon=True, name="backfill").start()
         # กันสแปมตอนบอทรีสตาร์ตซ้ำๆ: แจ้งว่าเริ่มงานไม่เกินครึ่งชั่วโมงละครั้ง
         self.line.send("✅ บอทเริ่มทำงานแล้ว\nโหมด: %s | ความเสี่ยง: %s\nเงินในบัญชี: %.2f %s\nถือไม้อยู่: %d" % (
             self.mode_label(), RISK_PROFILES[self.risk]["name"], self.ex.usdt_free(), self.ex.quote,
@@ -193,6 +198,10 @@ class Company:
             day0 = self.day_start_equity(eq)
             self.log("ฝ่ายบัญชี", "มูลค่าพอร์ต %.2f %s (วันนี้ %+.2f%%) ถือ %d ไม้ · เงินสด %.2f" % (
                 eq, self.ex.quote, (eq / day0 - 1) * 100 if day0 else 0, len(self.acct.open_positions()), self.ex.usdt_free()))
+        try:
+            self.learning.resolve()  # ติดตามผลข้อเสนอที่ผ่านมา (ทุก 30 นาที)
+        except Exception as e:
+            self.log("ฝ่ายพัฒนากลยุทธ์", "ติดตามผลไม่สำเร็จ: %s" % e)
         cfg = RISK_PROFILES[self.risk]
         if time.time() - self.last_scan < cfg["every_min"] * 60:
             self.save_paper()
@@ -202,16 +211,25 @@ class Company:
         if not self.riskd.can_trade(eq, day0):
             self.log("CEO", "สั่งงานรอบนี้: งดเปิดไม้ใหม่ (หยุดไว้/ขาดทุนถึงเพดาน) เฝ้าไม้ที่ถือ %d ไม้ต่อ" % len(self.acct.open_positions()))
             return
+        guard = self.riskd.guard(eq, day0)
+        if guard["level"] >= 3:
+            self.log("CEO", "สั่งงานรอบนี้: %s (%s) เฝ้าไม้ที่ถือ %d ไม้ต่อ" % (
+                guard["name"], ", ".join(guard["why"]), len(self.acct.open_positions())))
+            return
         self.regime = self.research.market_regime()
         if self.regime == "bear" and self.cfg.get("skip_bear_market", True) and self.risk != "high":
             self.log("CEO", "สั่งงานรอบนี้: ตลาดขาลง งดเปิดไม้ใหม่ (ตั้ง skip_bear_market=false เพื่อปิด)")
             return
         held = {p["symbol"] for p in self.acct.open_positions()}
         self.last_research = self.research.scan(self.risk)
-        props = self.strategy.proposals(self.last_research, self.risk, held, self.regime)
+        props = self.strategy.proposals(self.last_research, self.risk, held, self.regime, extra_score=guard["score_add"])
+        all_props = list(props)
+        self.ai.rejected_by = {}
         n_prop = len(props)
-        if props and self.riskd.slots_left(self.risk, self.regime, len(held)) > 0:
+        if props and self.riskd.slots_left(self.risk, self.regime, len(held), guard) > 0:
             track = self.acct.track_record()
+            track["lessons"] = self.learning.lessons()          # บทเรียนจากผลที่ผ่านมา ให้ AI ใช้ตัดสิน
+            track["capital_guard"] = guard["name"]
             g = self.gemini.analyze(props, self.regime, track, self.last_research)  # Gemini วิเคราะห์ก่อน
             props = self.ai.review(props, self.regime, track, gemini=g)          # แล้วประชุมกับ Claude
             if g:
@@ -221,9 +239,9 @@ class Company:
                                                "bought_candidates": [p["symbol"] for p in props]})
         # ถือเต็มแล้ว: ไม่ต้องเสียค่า AI ตรวจ ให้ฝ่ายบริหารความเสี่ยงแจ้งเหตุผลเลย
         orders = self.riskd.approve(props, self.risk, self.regime, self.acct.open_positions(),
-                                    self.ex.usdt_free(), eq, self.ex.filters)
+                                    self.ex.usdt_free(), eq, self.ex.filters, guard)
         n_ok = len(props)
-        bought = []
+        bought, liq_fail = [], set()
         max_spread = float(self.cfg.get("max_spread_pct", 0.5)) / 100
         max_slip = float(self.cfg.get("max_slippage_pct", 0.5)) / 100
         for o in orders:
@@ -232,6 +250,7 @@ class Company:
             if not ok:
                 self.log("ฝ่ายบริหารความเสี่ยง", "ไม่ซื้อ %s: %s" % (o["symbol"], why))
                 self.acct.add_decision("ฝ่ายบริหารความเสี่ยง", o["symbol"], False, "สภาพคล่องไม่ผ่าน: " + why)
+                liq_fail.add(o["symbol"])
                 continue
             self.log("ฝ่ายบริหารความเสี่ยง", "สภาพคล่อง %s ผ่าน (%s)" % (o["symbol"], why))
             try:
@@ -240,10 +259,13 @@ class Company:
             except Exception as e:
                 self.log("ฝ่ายเทรด", "ซื้อ %s ไม่สำเร็จ: %s" % (o["symbol"], e))
                 self.acct.add_decision("ฝ่ายเทรด", o["symbol"], False, "ส่งคำสั่งซื้อไม่สำเร็จ: %s" % e)
+        self.learning.record_round(getattr(self.strategy, "rejected", []), all_props, self.ai.rejected_by, orders,
+                                   set(bought), liq_fail, getattr(self.riskd, "last_full", set()))
         # CEO สรุปงานทุกรอบ: เห็นว่าบอททำงานอยู่ แม้ไม่มีใครเปิดแดชบอร์ด
-        self.log("CEO", "สั่งงานรอบนี้: วิจัย %d เหรียญ → กลยุทธ์เสนอ %d → ผ่านประชุม AI %d → ซื้อ %d%s · ถือ %d/%d ไม้ · ตลาด %s" % (
+        self.log("CEO", "สั่งงานรอบนี้: วิจัย %d เหรียญ → กลยุทธ์เสนอ %d → ผ่านประชุม AI %d → ซื้อ %d%s · ถือ %d/%d ไม้ · ตลาด %s%s" % (
             len(self.last_research), n_prop, n_ok, len(bought), (" (%s)" % ", ".join(bought)) if bought else "",
-            len(self.acct.open_positions()), RISK_PROFILES[self.risk]["max_pos"], self.regime))
+            len(self.acct.open_positions()), RISK_PROFILES[self.risk]["max_pos"], self.regime,
+            "" if guard["level"] == 0 and guard["size"] >= 1 else " · " + guard["name"] + (" ไม้ x%.2g" % guard["size"])))
         self.save_paper()
         self.daily_report()
 
@@ -262,6 +284,14 @@ class Company:
         self.acct.prune()
         day0 = self.acct.get("day_start_" + today) or s["equity"]
         chg = (s["equity"] / day0 - 1) * 100 if day0 else 0
+        try:
+            rv = self.learning.review(self.acct.get("guard_state"))
+            t = rv["trades"]
+            letter = ("📈 30 วัน: %d ไม้ ชนะ %.0f%% · คาดหวัง %+.2f%%/ไม้ · PF %.2f · DD %.1f%% · %s\n%s" % (
+                t["n"], t["win_pct"], t["exp"], t["pf"], t["max_dd"], (rv["guard"] or {}).get("name", "🟢 ปกติ"),
+                ("💡 " + rv["tips"][0]) if rv["tips"] else "") + (("\n\n" + letter) if letter else "")).strip()
+        except Exception as e:
+            self.log("ฝ่ายพัฒนากลยุทธ์", "สรุปผลไม่สำเร็จ: %s" % e)
         self.line.send("📊 สรุปประจำวัน %s (%s)\nมูลค่าพอร์ต: %.2f %s (วันนี้ %+.2f%%)\nกำไร/ขาดทุนสะสม: %+.2f\n"
                        "เทรดแล้ว %d ไม้ ชนะ %s%% | ถืออยู่ %d ไม้\nตลาด: %s\n(ได้ข้อความนี้ทุกคืน = บอทยังทำงานอยู่)%s" % (
                            today, self.mode_label(), s["equity"], self.ex.quote, chg, s["realized_pnl"],

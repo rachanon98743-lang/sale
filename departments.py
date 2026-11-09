@@ -331,8 +331,42 @@ class StrategyDept:
                 st[0] += 1
                 st[1] += 1 if p["pnl"] > 0 else 0
                 st[2] += p["pnl"] / p["cost"] if p["cost"] else 0
+        # ผลติดตามข้อเสนอที่ไม่ได้ซื้อ (ถ้าซื้อจะเป็นยังไง) ใช้สอนเพิ่ม น้ำหนักครึ่งหนึ่งของเทรดจริง
+        try:
+            since = (now_th() - timedelta(days=45)).isoformat()
+            for r in self.acct._q("SELECT features, status, result FROM signals WHERE status IN ('win','loss','flat') "
+                                  "AND stage != 'bought' AND t >= ?", (since,)):
+                for k, val in (json.loads(r["features"] or "{}")).items():
+                    st = stats.setdefault((k, val), [0, 0, 0.0])
+                    st[0] += 0.5
+                    st[1] += 0.5 if r["status"] == "win" else 0
+                    st[2] += 0.5 * (r["result"] or 0)
+        except Exception:
+            pass
         self.learned = {key: {"n": n, "win": w / n, "avg": ret / n} for key, (n, w, ret) in stats.items() if n >= 5}
         return self.learned
+
+    def cooldown(self, symbol):
+        """พักเหรียญที่เพิ่งทำเราขาดทุน (กันเทรดแก้แค้น) และเหรียญที่แพ้ซ้ำๆ"""
+        if not self.acct:
+            return None
+        h = float(self.cfg.get("cooldown_after_loss_h", 24))
+        since = (now_th() - timedelta(hours=h)).isoformat()
+        if h > 0 and self.acct._one("SELECT 1 FROM positions WHERE symbol=? AND status='closed' AND pnl<0 AND closed>=?",
+                                    (symbol, since)):
+            return "เพิ่งขาดทุนเหรียญนี้ภายใน %.0f ชม. พักก่อน กันเทรดแก้มือ" % h
+        r = self._one_stats(symbol)
+        if r and r["n"] >= 3 and r["w"] / r["n"] < 0.34 and r["tot"] < 0:
+            return "30 วันเทรดเหรียญนี้ %d ไม้ ชนะ %d ขาดทุนรวม %.2f พัก 7 วัน" % (r["n"], r["w"], r["tot"])
+        return None
+
+    def _one_stats(self, symbol):
+        last = self.acct._one("SELECT MAX(closed) c FROM positions WHERE symbol=? AND status='closed' AND pnl<0", (symbol,))
+        if not last or not last["c"] or datetime.fromisoformat(last["c"]) < now_th() - timedelta(days=7):
+            return None  # ไม่มีขาดทุนใน 7 วันล่าสุด = พ้นช่วงพักแล้ว
+        since = (now_th() - timedelta(days=30)).isoformat()
+        return self.acct._one("SELECT COUNT(*) n, COALESCE(SUM(pnl>0),0) w, COALESCE(SUM(pnl),0) tot FROM positions "
+                              "WHERE symbol=? AND status='closed' AND closed>=?", (symbol, since))
 
     def adjust(self, feats):
         """ปรับคะแนนจากสิ่งที่เรียนรู้ ±15 สูงสุด คืน (ค่าปรับ, คำอธิบาย)"""
@@ -347,9 +381,11 @@ class StrategyDept:
                 notes.append("%s %s ชนะ %.0f%% จาก %d ไม้" % (FEATURE_TH.get(k, k), val, st["win"] * 100, st["n"]))
         return max(-15, min(15, adj)), notes
 
-    def proposals(self, research, risk, held, regime="neutral"):
+    def proposals(self, research, risk, held, regime="neutral", extra_score=0):
         cfg = RISK_PROFILES[risk]
         self.learn()
+        self.rejected = []  # (ข้อมูลเหรียญ, เหตุผล) ให้ฝ่ายพัฒนากลยุทธ์ติดตามผลต่อ
+        min_score = cfg["min_score"] + extra_score
         min_ev = float(self.cfg.get("min_backtest_ev_pct", 0)) / 100
         min_bt = int(self.cfg.get("min_backtest_trades", 6))
         out = []
@@ -359,17 +395,26 @@ class StrategyDept:
             feats = features_of(r, regime)
             adj, notes = self.adjust(feats)
             score = r["score"] + adj
-            if score < cfg["min_score"]:
-                if r["score"] >= cfg["min_score"]:  # ผ่านเกณฑ์เดิม แต่สถิติของบอทเองบอกว่าแบบนี้แพ้บ่อย
-                    self.reject(r["symbol"], "คะแนน %d → %.0f หลังเรียนรู้จากผลเทรดเอง (%s)" % (
-                        r["score"], score, "; ".join(notes)))
+            sl0, tp0 = r.get("sl_pct") or exit_levels(cfg, r["atr"])[0], r.get("tp_pct") or exit_levels(cfg, r["atr"])[1]
+            if score < min_score:
+                if r["score"] >= cfg["min_score"]:  # ผ่านเกณฑ์เดิม แต่สถิติของบอทเอง/โหมดป้องกันเงินต้นบอกว่ายังไม่พอ
+                    why = "คะแนน %d → %.0f (เกณฑ์ %d)%s" % (r["score"], score, min_score,
+                        (" หลังเรียนรู้จากผลเทรดเอง (%s)" % "; ".join(notes)) if notes else " โหมดป้องกันเงินต้นยกเกณฑ์")
+                    self.reject(r["symbol"], why)
+                    self.rejected.append((dict(r, features=feats, sl_pct=sl0, tp_pct=tp0), why))
+                continue
+            cd = self.cooldown(r["symbol"])
+            if cd:
+                self.reject(r["symbol"], cd)
                 continue
             bt = r.get("bt") or {}
             if bt.get("trades", 0) >= min_bt and bt.get("ev", 0) < min_ev:
-                self.reject(r["symbol"], "ทดสอบย้อนหลังสัญญาณนี้ %d ครั้ง ชนะ %d ได้เฉลี่ย %+.2f%%/ไม้ (ไม่คุ้ม)" % (
-                    bt["trades"], bt["wins"], bt["ev"] * 100))
+                why = "ทดสอบย้อนหลังสัญญาณนี้ %d ครั้ง ชนะ %d ได้เฉลี่ย %+.2f%%/ไม้ (ไม่คุ้ม)" % (
+                    bt["trades"], bt["wins"], bt["ev"] * 100)
+                self.reject(r["symbol"], why)
+                self.rejected.append((dict(r, features=feats, sl_pct=sl0, tp_pct=tp0), why))
                 continue
-            sl, tp = r.get("sl_pct") or exit_levels(cfg, r["atr"])[0], r.get("tp_pct") or exit_levels(cfg, r["atr"])[1]
+            sl, tp = sl0, tp0
             why = list(r["why"]) + (["เรียนรู้ %+.0f" % adj] if adj else [])
             out.append({"symbol": r["symbol"], "price": r["price"], "score": round(score), "why": why,
                         "sl_pct": sl, "tp_pct": tp, "rsi": r["rsi"], "mom": r["mom"], "chg24": r["chg24"],
@@ -467,6 +512,8 @@ class AIAnalystDept:
         approved = []
         for p in proposals:
             v = views.get(p["symbol"])
+            if v is not None and v["view"] != "buy":
+                self.rejected_by[p["symbol"]] = "gemini"
             if v is None or v["view"] == "buy":
                 p["ai_reason"] = ("Gemini: " + v["reason"]) if v else ""
                 approved.append(p)
@@ -482,6 +529,7 @@ class AIAnalystDept:
         Gemini ค้านแรง (ไม่ควรแตะ + มั่นใจ >= gemini_veto_conf) = ไม่ซื้อ แม้ Claude อนุมัติ"""
         views = (gemini or {}).get("views") or {}
         self.last_meeting = None
+        self.rejected_by = {}  # symbol -> "claude" / "gemini" ให้ฝ่ายพัฒนากลยุทธ์ติดตามว่าใครปฏิเสธถูก
         if not proposals:
             return proposals
         if not self.enabled:
@@ -543,6 +591,7 @@ class AIAnalystDept:
                 if reason:
                     self.log(self.name, "อนุมัติ %s: %s" % (s, reason))
             else:
+                self.rejected_by[s] = "gemini" if vetoed else "claude"
                 self.log(self.name, "ปฏิเสธ %s: %s" % (s, reason))
                 self.acct.add_decision(self.GEMINI_DEPT if vetoed else self.name, s, False, reason or "ไม่ระบุเหตุผล")
         if minutes:
@@ -701,17 +750,78 @@ class RiskDept:
         self.halted = False
         return True
 
-    def approve(self, proposals, risk, regime, open_pos, usdt_free, equity_now, filters):
+    GUARD = [  # ระดับป้องกันเงินต้น: (ชื่อ, คูณขนาดไม้, เพิ่มคะแนนผ่าน, ลดเพดานไม้)
+        ("🟢 ปกติ", 1.0, 0, 0), ("🟡 ระวัง", 0.5, 5, 1), ("🟠 ป้องกัน", 0.25, 10, 2), ("🔴 พักเทรด", 0.0, 99, 99)]
+
+    def guard(self, equity_now, equity_day_start):
+        """ป้องกันเงินต้นอัตโนมัติ: ยิ่งพอร์ตย่อจากจุดสูงสุด/แพ้ติดกัน ยิ่งลดขนาดไม้และคัดเข้มขึ้น
+        ได้กำไรวันนี้ถึงเป้า → ลดขนาดไม้ครึ่งหนึ่งที่เหลือของวัน (ล็อกกำไรรายวัน)"""
+        dd_lv = [float(x) for x in self.cfg.get("guard_dd_pct", [3, 6, 10])]
+        st_lv = [int(x) for x in self.cfg.get("guard_loss_streak", [3, 5])]
+        reset = self.acct.get("guard_reset_t") or "0"
+        since = max((now_th() - timedelta(days=30)).isoformat(), reset)
+        r = self.acct._one("SELECT MAX(value) m FROM equity WHERE t >= ?", (since,))
+        peak = max((r or {}).get("m") or 0, equity_now)
+        dd = (1 - equity_now / peak) * 100 if peak else 0
+        streak = 0
+        for p in self.acct._q("SELECT pnl FROM positions WHERE status='closed' AND closed >= ? ORDER BY closed DESC LIMIT 10", (since,)):
+            if p["pnl"] > 0:
+                break
+            streak += 1
+        lv, why = 0, []
+        if dd >= dd_lv[0] or streak >= st_lv[0]:
+            lv = 1
+        if dd >= dd_lv[1] or streak >= st_lv[1]:
+            lv = 2
+        if dd >= dd_lv[2]:
+            lv = 3
+        if dd >= 0.5:
+            why.append("พอร์ตย่อจากจุดสูงสุด %.1f%%" % dd)
+        if streak:
+            why.append("แพ้ติดกัน %d ไม้" % streak)
+        if lv == 3:  # พัก 48 ชม. แล้วกลับมาเทรดในระดับป้องกัน (นับจุดสูงสุดใหม่)
+            t0 = self.acct.get("guard_halt_t")
+            if not t0:
+                self.acct.set("guard_halt_t", now_th().isoformat())
+                self.log(self.name, "🔴 พอร์ตย่อ %.1f%% จากจุดสูงสุด พักเปิดไม้ใหม่ 48 ชม. รักษาเงินต้น (ไม้เดิมยังมี stop คุม)" % dd,
+                         line=True, key="guard_halt", every=3600 * 12, urgent=True)
+            elif datetime.fromisoformat(t0) < now_th() - timedelta(hours=48):
+                self.acct.set("guard_reset_t", now_th().isoformat())
+                self.acct.set("guard_halt_t", None)
+                self.log(self.name, "ครบ 48 ชม. กลับมาเปิดไม้แบบระดับป้องกัน (ไม้เล็ก คัดเข้ม)", line=True, key="guard_resume", every=3600)
+                lv = 2
+        elif self.acct.get("guard_halt_t"):
+            self.acct.set("guard_halt_t", None)
+        name, mult, add, cut = self.GUARD[lv]
+        lock = float(self.cfg.get("daily_profit_lock_pct", 2))
+        day = (equity_now / equity_day_start - 1) * 100 if equity_day_start else 0
+        if lv < 3 and lock > 0 and day >= lock:
+            mult = min(mult, 0.5)
+            why.append("กำไรวันนี้ %+.1f%% ถึงเป้า %.0f%% ลดขนาดไม้ ล็อกกำไรของวัน" % (day, lock))
+        g = {"level": lv, "name": name, "size": mult, "score_add": add, "pos_cut": cut, "dd": round(dd, 2),
+             "streak": streak, "day_pct": round(day, 2), "why": why}
+        prev = self.acct.get("guard_level")
+        if prev is not None and prev != lv:
+            self.log(self.name, "ระดับป้องกันเงินต้น: %s → %s (%s)" % (self.GUARD[prev][0], name, ", ".join(why) or "ฟื้นแล้ว"),
+                     line=lv > prev, key="guard_%d" % lv, every=3600)
+        self.acct.set("guard_level", lv)
+        self.acct.set("guard_state", g)
+        return g
+
+    def approve(self, proposals, risk, regime, open_pos, usdt_free, equity_now, filters, guard=None):
         cfg = RISK_PROFILES[risk]
-        slots = cfg["max_pos"] - len(open_pos)
+        guard = guard or {"size": 1.0, "pos_cut": 0, "name": ""}
+        slots = max(1, cfg["max_pos"] - guard["pos_cut"]) - len(open_pos) if guard["size"] > 0 else 0
         if regime == "bear":
             slots = min(slots, 1)  # ตลาดขาลง: เปิดได้แค่ทีละไม้
             size_mult = 0.5
         else:
             size_mult = 1.0
+        size_mult *= guard["size"]
         capital = min(equity_now, self.max_capital)  # ใช้เงินไม่เกินเพดานที่ตั้งไว้
         used = sum(p["cost"] for p in open_pos)
         orders, full, poor = [], [], []
+        self.last_full = set()
         for p in proposals:
             if slots <= 0:
                 full.append(p["symbol"])
@@ -728,8 +838,10 @@ class RiskDept:
             usdt_free -= amt
             slots -= 1
         if full:  # รวมเป็นบรรทัดเดียว ไม่ให้ log/LINE รก
-            self.deny(full, "ถือครบ %d ไม้แล้ว (เพดานความเสี่ยง%s) รอให้มีไม้ปิดก่อน" % (cfg["max_pos"], cfg["name"])
+            self.deny(full, ("ถือครบ %d ไม้แล้ว (เพดานความเสี่ยง%s%s) รอให้มีไม้ปิดก่อน" % (
+                max(1, cfg["max_pos"] - guard["pos_cut"]), cfg["name"], (" · " + guard["name"]) if guard["pos_cut"] else ""))
                       if regime != "bear" else "ตลาดขาลง เปิดได้ทีละ 1 ไม้")
+        self.last_full = set(full)
         if poor:
             self.deny(poor, "เงินที่เหลือไม่ถึงขั้นต่ำต่อไม้ (เก็บเงินสำรองไว้ %.0f%% ไม่ใช้)" % (self.reserve * 100))
         if orders:
@@ -742,8 +854,9 @@ class RiskDept:
         self.log(self.name, "ไม่อนุมัติ %s: %s" % (names, why))
         self.acct.add_decision(self.name, names if len(names) <= 120 else names[:117] + "...", False, why)
 
-    def slots_left(self, risk, regime, n_open):
-        s = RISK_PROFILES[risk]["max_pos"] - n_open
+    def slots_left(self, risk, regime, n_open, guard=None):
+        cut = (guard or {}).get("pos_cut", 0)
+        s = max(1, RISK_PROFILES[risk]["max_pos"] - cut) - n_open
         return min(s, 1) if regime == "bear" else s
 
 
@@ -801,7 +914,8 @@ class ExecutionDept:
         bt = o.get("bt") or {}
         meta = {"features": o.get("features") or {}, "p_win": bt.get("p_win"), "ev": bt.get("ev"),
                 "sl_pct": o["sl_pct"], "peak": px,
-                "bt_trades": bt.get("trades"), "ai_reason": o.get("ai_reason", ""), "score": o.get("score")}
+                "bt_trades": bt.get("trades"), "ai_reason": o.get("ai_reason", ""), "score": o.get("score"),
+                "gemini": o.get("gemini", "")}
         pid = self.acct.open_position(s, qty, px, spent, sl, tp, oco, risk, "; ".join(o["why"]), meta)
         fc = ""
         if bt.get("p_win") is not None:
@@ -843,9 +957,28 @@ class ExecutionDept:
             if px <= p["sl"]:
                 reason = "ล็อกกำไร" if p["sl"] > p["entry"] else "ตัดขาดทุน"
             else:
-                reason = "ทำกำไร" if px >= p["tp"] else None
+                reason = "ทำกำไร" if px >= p["tp"] else self.time_stop(p, px)
             if reason:
                 self.sell(p, reason)
+
+    TIME_STOP_H = {"low": 96, "mid": 48, "high": 12}
+
+    def time_stop(self, p, px):
+        """ถือนานเกินกำหนดแต่ยังไม่ถึง 1R: ถ้ามีกำไรพอหักค่าธรรมเนียม ขายเก็บไว้ก่อน ปล่อยเงินไปหาไม้ใหม่
+        (ไม้ที่ขาดทุนอยู่ไม่ขาย ปล่อยให้ stop เดิมคุม)"""
+        if not self.cfg.get("time_stop", True):
+            return None
+        hrs = self.cfg.get("time_stop_hours") or self.TIME_STOP_H
+        h = float(hrs.get(p.get("risk") or "mid", 48)) if isinstance(hrs, dict) else float(hrs)
+        try:
+            age = (now_th() - datetime.fromisoformat(p["opened"])).total_seconds() / 3600
+        except (TypeError, ValueError):
+            return None
+        r = (p.get("meta_d") or {}).get("sl_pct") or 0.05
+        gain = px / p["entry"] - 1
+        if age >= h and 4 * self.ex.fee + 0.002 <= gain < r:
+            return "หมดเวลา เก็บกำไร"
+        return None
 
     def sell(self, p, reason):
         with self.lock:
@@ -889,6 +1022,9 @@ class AccountingDept:
         CREATE TABLE IF NOT EXISTS logs(t TEXT, dept TEXT, msg TEXT);
         CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT);
         CREATE TABLE IF NOT EXISTS decisions(t TEXT, dept TEXT, symbol TEXT, ok INTEGER, reason TEXT);
+        CREATE TABLE IF NOT EXISTS signals(t TEXT, symbol TEXT, stage TEXT, price REAL, sl_pct REAL, tp_pct REAL,
+            features TEXT, reason TEXT, source TEXT, status TEXT, result REAL, closed TEXT);
+        CREATE INDEX IF NOT EXISTS signals_status ON signals(status, symbol);
         CREATE INDEX IF NOT EXISTS logs_t ON logs(t);
         CREATE INDEX IF NOT EXISTS logs_dept ON logs(dept, t);
         CREATE INDEX IF NOT EXISTS equity_t ON equity(t);
