@@ -15,7 +15,7 @@ import urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
 API = "https://api.line.me/v2/bot"
 DATA_API = "https://api-data.line.me/v2/bot"
-NAME = "kiki-bot-menu"
+NAME = "webull-bot-menu"  # ห้ามซ้ำกับของบอทคริปโต ไม่งั้นจะลบเมนูกันเอง
 W, H = 2500, 1686
 BUTTONS = ["สถานะ", "ไม้ที่ถือ", "สรุปวันนี้", "หยุด", "เริ่ม", "ช่วยเหลือ"]
 
@@ -84,6 +84,10 @@ def main():
     token = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
     if not token:
         sys.exit("❌ ยังไม่ได้ตั้ง LINE_CHANNEL_ACCESS_TOKEN (manage.sh ข้อ 11)")
+    from line_bot import shared_with_crypto
+    if shared_with_crypto(token):
+        sys.exit("❌ บอทหุ้นใช้ LINE OA เดียวกับบอทคริปโต ติดตั้งริชเมนูไม่ได้ (จะไปทับเมนูบอทคริปโต)\n"
+                 "   สร้าง LINE OA ใหม่ให้บอทหุ้น แล้วใส่ token ที่ manage.sh ข้อ 11")
     url = dashboard_url()
     try:
         install(token, url)

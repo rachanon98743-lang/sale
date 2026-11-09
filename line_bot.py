@@ -372,14 +372,32 @@ def _ts(*args, timeout=25):
     return subprocess.run(["tailscale"] + list(args), capture_output=True, text=True, timeout=timeout)
 
 
-def _funnel_ok(port):
+HOOK_PATH = "/webull/line/webhook"  # path ของบอทหุ้นเอง ไม่ทับ /line/webhook ของบอทคริปโตบนเครื่องเดียวกัน
+
+
+def shared_with_crypto(token):
+    """ใช้ LINE OA เดียวกับบอทคริปโตไหม (LINE ตั้ง webhook ได้ทีละ 1 ที่ ใช้ร่วมกันจะแย่งกันรับคำสั่ง)"""
+    try:
+        for line in open("/root/bot.env", encoding="utf-8"):
+            if line.startswith("LINE_CHANNEL_ACCESS_TOKEN="):
+                return line.split("=", 1)[1].strip() == token
+    except OSError:
+        pass
+    return False
+
+
+def _funnel_ok(port, path=HOOK_PATH):
     try:
         st = json.loads(_ts("funnel", "status", "--json").stdout or "{}")
     except Exception:
         return False
-    allow = any(st.get("AllowFunnel", {}).values())
-    proxies = json.dumps(st.get("Web", {}))
-    return allow and (":%d" % port) in proxies
+    if not any(st.get("AllowFunnel", {}).values()):
+        return False
+    for web in (st.get("Web") or {}).values():
+        own = ((web.get("Handlers") or {}).get(path) or {}).get("Proxy", "")
+        if own:
+            return (":%d" % port) in own
+    return False
 
 
 def doctor(bot, fix=True):
@@ -404,14 +422,19 @@ def doctor(bot, fix=True):
     if not host:
         out.append((False, "ยังไม่ได้เปิด MagicDNS/HTTPS ใน Tailscale (admin console → DNS)"))
         return out
-    expected = "https://%s/line/webhook" % host
+    expected = "https://%s%s" % (host, HOOK_PATH)
+    if shared_with_crypto(bot.token):
+        out.append((False, "บอทหุ้นใช้ LINE OA เดียวกับบอทคริปโต: ส่งแจ้งเตือนได้ แต่รับคำสั่งในแชทไม่ได้ "
+                           "(ถ้าตั้ง webhook มาที่บอทหุ้น บอทคริปโตจะใช้ปุ่มไม่ได้) สร้าง LINE OA ใหม่ให้บอทหุ้นแล้วใส่ที่ manage.sh ข้อ 11 และ 13"))
+        return out
     # 3) Funnel (ทางเข้าจากอินเทอร์เน็ตให้ LINE ส่งข้อความเข้ามา)
     if _funnel_ok(port):
         out.append((True, "Tailscale Funnel เปิดอยู่ → พอร์ต %d" % port))
     elif fix:
-        r = _ts("funnel", "--bg", "--yes", str(port))
+        target = "http://127.0.0.1:%d%s" % (port, HOOK_PATH)
+        r = _ts("funnel", "--bg", "--yes", "--set-path=" + HOOK_PATH, target)
         if r.returncode != 0 and "yes" in (r.stderr or ""):
-            r = _ts("funnel", "--bg", str(port))
+            r = _ts("funnel", "--bg", "--set-path=" + HOOK_PATH, target)
         txt = (r.stdout or "") + (r.stderr or "")
         if _funnel_ok(port):
             out.append((True, "Funnel หลุดอยู่ เปิดใหม่ให้แล้ว → พอร์ต %d" % port))
@@ -554,7 +577,8 @@ def serve(company, port=8091):
             return self.rfile.read(n) if n else b""
 
         def do_POST(self):
-            if self.path.rstrip("/") not in ("/line/webhook", "/webhook"):
+            p = self.path.split("?")[0].rstrip("/")
+            if p not in ("", "/line/webhook", "/webhook") and not p.endswith("/webhook"):
                 return self._ok(404)
             body = self._read_body()
             sig = self.headers.get("X-Line-Signature")
@@ -572,6 +596,10 @@ def serve(company, port=8091):
             except Exception as e:
                 company.log("CEO", "อ่าน webhook LINE ไม่ได้: %s" % e)
 
+    if shared_with_crypto(bot.token):
+        company.log("CEO", "ใช้ LINE OA เดียวกับบอทคริปโต: ส่งแจ้งเตือนเข้า LINE ได้ แต่ไม่รับคำสั่งในแชท "
+                           "(กันแย่ง webhook/ริชเมนูกับบอทคริปโต) อยากสั่งงานในแชท ให้สร้าง LINE OA ใหม่ให้บอทหุ้น")
+        return None
     company.log("CEO", "เปิดรับคำสั่งจาก LINE ที่พอร์ต %d" % port)
     srv = ThreadingHTTPServer(("127.0.0.1", port), H)
     company.keep_thread("รับคำสั่ง LINE", srv.serve_forever)
