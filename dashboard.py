@@ -87,12 +87,18 @@ class Snapshot:
             "health": {"loop_age": time.time() - co.last_ok, "uptime": _dur(time.time() - co.started_at), "down": co.downtime_note},
             "ai": {"has_key": bool(co.ai.key), "enabled": co.ai.enabled, "enabled_setting": bool(co.ai.setting("ai_enabled", True)),
                    "model": co.ai.model, "usage": usage, "limits": limits, "over": over, "calls": co.acct.recent_ai_calls(30)},
+            "gemini": {"has_key": bool(co.gemini.key), "enabled": co.gemini.enabled,
+                       "enabled_setting": bool(co.gemini.setting("gemini_enabled", True)), "model": co.gemini.model,
+                       "calls": co.gemini.calls_today(), "limit": int(co.gemini.setting("gemini_daily_calls", 200)),
+                       "veto": int(co.ai.setting("gemini_veto_conf", 80)), "err": co.gemini.last_err},
+            "meeting": co.acct.get("last_meeting"),
             "activity": co.acct.dept_activity(),
             "line": {"enabled": co.line.enabled, "limit": co.line.monthly_limit,
                      "count": st.get("count", 0) if st.get("month") == time.strftime("%Y-%m") else 0,
                      "health": getattr(lb, "health", None), "last_webhook": co.acct.get("line_last_webhook")},
-            "depts": [{"icon": i, "name": n, "note": ("Claude " + co.ai.model.split("-")[1].title()) if "AI" in n and co.ai.enabled
-                       else ("ปิดอยู่" if "AI" in n else "")} for i, n in DEPTS],
+            "depts": [{"icon": i, "name": n, "note": (("Claude " + co.ai.model.split("-")[1].title()) if co.ai.enabled else "ปิดอยู่") if "AI" in n
+                       else ((co.gemini.model if co.gemini.enabled else ("ปิดอยู่" if co.gemini.key else "ยังไม่ใส่ key")) if "Gemini" in n else "")}
+                      for i, n in DEPTS],
         }
 
     def refresh(self):
@@ -171,6 +177,8 @@ tr.click{cursor:pointer}tr.click:active{background:#21262d}
 
 <div class="card"><h3>ผลวิจัยล่าสุด <span class="m" style="font-weight:400;font-size:12px">แตะเหรียญเพื่อดูกราฟ + เช็กลิสต์</span></h3><div class="sc"><table><thead><tr><th>เหรียญ</th><th>ราคา</th><th>24ชม.</th><th>RSI</th><th>คะแนน</th><th>จังหวะ</th><th>ย้อนหลังชนะ</th><th>คาดหวัง/ไม้</th></tr></thead><tbody id="res"></tbody></table></div></div>
 
+<div class="card"><h3>🤝 ประชุม AI: Gemini + Claude <span class="m" style="font-weight:400;font-size:12px">ควรเทรดตัวไหน</span></h3><div id="gmState" class="m"></div><div id="meet"></div></div>
+
 <div class="card"><h3>🧠 ฝ่ายนักวิเคราะห์ AI · งบและการใช้ token</h3>
 <div id="aiState" class="m"></div>
 <div id="bars"></div>
@@ -182,6 +190,8 @@ tr.click{cursor:pointer}tr.click:active{background:#21262d}
 <div><label>งบต่อเดือน (USD)</label><input id="f_month" type="number" step="0.1" min="0" max="1000"></div>
 <div><label>token สูงสุดต่อวัน</label><input id="f_tok" type="number" step="1000" min="0" max="50000000"></div>
 <div><label>token ตอบสูงสุดต่อครั้ง</label><input id="f_call" type="number" step="50" min="100" max="4000"></div>
+<div><label>เปิดใช้ Gemini (ฟรี)</label><select id="f_gen"><option value="1">เปิด</option><option value="0">ปิด</option></select></div>
+<div><label>Gemini ค้านได้เมื่อมั่นใจ ≥ (%)</label><input id="f_veto" type="number" step="5" min="50" max="101"></div>
 </div>
 <p><button class="pri" id="save">บันทึก</button> <span id="saveMsg" class="m"></span></p>
 <p class="m" style="font-size:12px">ถึงเพดานไหนก่อน AI จะหยุดทันที บอทยังเทรดต่อตามกฎ ไม่ใช้ AI จนกว่าจะขึ้นวัน/เดือนใหม่</p>
@@ -259,7 +269,10 @@ $('stopTxt').textContent=D.stopped?'หยุดเปิดไม้ใหม�
 const A=D.ai,u=A.usage,l=A.limits;
 put('aiState',!A.has_key?'⚪ ยังไม่ได้ใส่ Claude API key (เมนู manage.sh ข้อ 2) บอทใช้กฎอย่างเดียว':!A.enabled?'⚪ ปิด AI อยู่':A.over.length?'🔴 ถึงเพดานแล้ว: '+esc(A.over.join(', '))+' (AI หยุดชั่วคราว)':'🟢 ทำงานอยู่ · รุ่น '+esc(A.model)+' · วันนี้เรียก '+u.day_calls+' ครั้ง');
 put('bars',bar('ค่าใช้จ่ายวันนี้',u.day_usd,l.day_usd,v=>'$'+f(v,4))+bar('ค่าใช้จ่ายเดือนนี้',u.month_usd,l.month_usd,v=>'$'+f(v,4))+bar('token วันนี้',u.day_tokens,l.day_tokens,v=>f(v,0)));
-if(!formLoaded){$('f_en').value=A.enabled_setting?'1':'0';$('f_model').value=A.model;$('f_day').value=l.day_usd;$('f_month').value=l.month_usd;$('f_tok').value=l.day_tokens;$('f_call').value=l.max_tokens_per_call;formLoaded=true;}
+if(!formLoaded){$('f_en').value=A.enabled_setting?'1':'0';$('f_model').value=A.model;$('f_day').value=l.day_usd;$('f_month').value=l.month_usd;$('f_tok').value=l.day_tokens;$('f_call').value=l.max_tokens_per_call;$('f_gen').value=D.gemini.enabled_setting?'1':'0';$('f_veto').value=D.gemini.veto;formLoaded=true;}
+const G=D.gemini,M=D.meeting,GV={buy:'🟢 ควรซื้อ',wait:'🟡 รอก่อน',avoid:'🔴 ไม่ควรแตะ'};
+put('gmState',!G.has_key?'⚪ ยังไม่ได้ใส่ Gemini API key (ฟรี: aistudio.google.com/apikey แล้วเมนู manage.sh ข้อ 20)':!G.enabled?'⚪ ปิด Gemini อยู่':'🟢 Gemini ทำงานอยู่ · รุ่น '+esc(G.model)+' · วันนี้ '+G.calls+'/'+G.limit+' ครั้ง (ฟรี)'+(G.err?' · ⚠️ '+esc(G.err):''));
+put('meet',!M?'<div class="m">ยังไม่มีการประชุม รอรอบที่มีข้อเสนอซื้อ</div>':'<div class="m">ล่าสุด '+esc(M.t.slice(11,16))+' · ตลาด '+esc(M.regime||'')+(M.market?' · '+esc(M.market):'')+'</div>'+Object.entries(M.views||{}).map(([s,v])=>`<div><b>${esc(s)}</b> ${GV[v.view]||esc(v.view)} ${v.confidence}% <span class="m">${esc(v.reason)}</span></div>`).join('')+((M.minutes||[]).length?'<h3 style="margin-top:8px;font-size:14px">ผลตัดสินร่วมกับ Claude</h3>'+M.minutes.map(x=>`<div>${esc(x)}</div>`).join(''):'')+((M.watch||[]).length?'<h3 style="margin-top:8px;font-size:14px">👀 น่าจับตา (ยังไม่ซื้อ)</h3>'+M.watch.map(w=>`<div><b>${esc(w.symbol)}</b> <span class="m">${esc(w.reason)}</span></div>`).join(''):''));
 put('calls',A.calls.map(x=>`<tr><td class="m">${esc(x.t.slice(5,16).replace('T',' '))}</td><td style="text-align:left;white-space:normal"><details data-k="${esc(x.t)}"><summary>${esc(x.purpose)}</summary><pre>${esc(x.result)}</pre></details></td><td>${f(x.tin,0)} / ${f(x.tout,0)}</td><td>$${f(x.usd,5)}</td></tr>`).join('')||'<tr><td class="m">ยังไม่มี</td></tr>');
 const LN=D.line;put('lineState',LN.enabled?'🟢 ส่งแจ้งเตือนได้':'⚪ ยังไม่ได้เชื่อม LINE: ใส่ token และ user ID ที่เมนู manage.sh ข้อ 11');
 put('lineBar',bar('ข้อความเดือนนี้',LN.count,LN.limit,v=>f(v,0)));
@@ -281,19 +294,20 @@ async function load(){clearTimeout(timer);try{const res=await fetch('/api/status
  if(!document.hidden)timer=setTimeout(load,5000);}
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)load();});
 $('stop').onclick=async()=>{await fetch('/api/toggle-stop',{method:'POST'});load();};
-$('save').onclick=async()=>{const body={ai_enabled:$('f_en').value==='1',ai_model:$('f_model').value,ai_daily_budget_usd:+$('f_day').value,ai_monthly_budget_usd:+$('f_month').value,ai_daily_token_limit:+$('f_tok').value,ai_max_tokens_per_call:+$('f_call').value};
+$('save').onclick=async()=>{const body={ai_enabled:$('f_en').value==='1',ai_model:$('f_model').value,ai_daily_budget_usd:+$('f_day').value,ai_monthly_budget_usd:+$('f_month').value,ai_daily_token_limit:+$('f_tok').value,ai_max_tokens_per_call:+$('f_call').value,gemini_enabled:$('f_gen').value==='1',gemini_veto_conf:+$('f_veto').value};
  const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const j=await r.json().catch(()=>({}));
  $('saveMsg').textContent=r.ok?'✅ บันทึกแล้ว':'❌ '+(j.error||'บันทึกไม่ได้');formLoaded=false;load();};
 $('ltest').onclick=async()=>{$('lmsg').textContent='กำลังส่ง...';const r=await fetch('/api/line-test',{method:'POST'});const j=await r.json().catch(()=>({}));$('lmsg').textContent=j.msg||'ผิดพลาด';load();};
 load();
 </script></body></html>"""
 
-DEPTS = [("👔", "CEO"), ("🔎", "ฝ่ายวิจัยตลาด"), ("♟️", "ฝ่ายกลยุทธ์"), ("🧠", "ฝ่ายนักวิเคราะห์ AI"),
+DEPTS = [("👔", "CEO"), ("🔎", "ฝ่ายวิจัยตลาด"), ("♟️", "ฝ่ายกลยุทธ์"), ("🧠", "ฝ่ายนักวิเคราะห์ AI"), ("♊", "ฝ่ายวิเคราะห์ Gemini"),
          ("🛡️", "ฝ่ายบริหารความเสี่ยง"), ("⚡", "ฝ่ายเทรด"), ("📒", "ฝ่ายบัญชี")]
 SETTINGS = {  # ชื่อ: (ชนิด, ต่ำสุด, สูงสุด)
     "ai_enabled": (bool, None, None), "ai_model": (str, None, None),
     "ai_daily_budget_usd": (float, 0, 100), "ai_monthly_budget_usd": (float, 0, 1000),
     "ai_daily_token_limit": (int, 0, 50_000_000), "ai_max_tokens_per_call": (int, 100, 4000),
+    "gemini_enabled": (bool, None, None), "gemini_veto_conf": (int, 50, 101),
 }
 MODELS = {"claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"}
 

@@ -35,6 +35,7 @@ HELP = """📋 คำสั่งที่ใช้ได้ (กดปุ่ม
 • สถานะ – มูลค่าพอร์ต กำไร โหมด
 • แผนก – งานล่าสุดของทุกแผนก (แตะดูทีละแผนก)
 • ไม่อนุมัติ – เหรียญที่ไม่ซื้อ พร้อมเหตุผลของแต่ละฝ่าย
+• ประชุม – ผลประชุม Gemini + Claude ล่าสุด ว่าควรเทรดตัวไหน
 • คาดการณ์ – ไม้ที่ถือ ถ้าถึงเป้า/โดนตัด ได้เสียเท่าไร
 • แดชบอร์ด – ลิงก์เปิดหน้าแดชบอร์ด (เปิด Tailscale ก่อน)
 • ไม้ที่ถือ – เหรียญที่ถืออยู่ + กำไร/ขาดทุนตอนนี้
@@ -55,12 +56,13 @@ DEPTS = [("👔", "CEO", ("ceo", "ซีอีโอ")),
          ("🔎", "ฝ่ายวิจัยตลาด", ("ฝ่ายวิจัย", "วิจัย", "วิจัยตลาด")),
          ("♟️", "ฝ่ายกลยุทธ์", ("กลยุทธ์",)),
          ("🧠", "ฝ่ายนักวิเคราะห์ AI", ("ai", "นักวิเคราะห์", "ฝ่ายai", "นักวิเคราะห์ai")),
+         ("♊", "ฝ่ายวิเคราะห์ Gemini", ("gemini", "เจมิไน", "จีมิไน", "เจมินี่", "ฝ่ายgemini")),
          ("🛡️", "ฝ่ายบริหารความเสี่ยง", ("ความเสี่ยง", "บริหารความเสี่ยง", "ฝ่ายความเสี่ยง")),
          ("⚡", "ฝ่ายเทรด", ("เทรด",)),
          ("📒", "ฝ่ายบัญชี", ("บัญชี",))]
-SHORT = {"CEO": "CEO", "ฝ่ายวิจัยตลาด": "วิจัย", "ฝ่ายกลยุทธ์": "กลยุทธ์", "ฝ่ายนักวิเคราะห์ AI": "AI",
+SHORT = {"CEO": "CEO", "ฝ่ายวิจัยตลาด": "วิจัย", "ฝ่ายกลยุทธ์": "กลยุทธ์", "ฝ่ายนักวิเคราะห์ AI": "AI", "ฝ่ายวิเคราะห์ Gemini": "Gemini",
          "ฝ่ายบริหารความเสี่ยง": "ความเสี่ยง", "ฝ่ายเทรด": "เทรด", "ฝ่ายบัญชี": "บัญชี"}
-MAIN_QR = ["สถานะ", "แผนก", "ไม่อนุมัติ", "คาดการณ์", "ไม้ที่ถือ", "สรุปวันนี้", "แดชบอร์ด", "ช่วยเหลือ"]
+MAIN_QR = ["สถานะ", "แผนก", "ประชุม", "ไม่อนุมัติ", "คาดการณ์", "ไม้ที่ถือ", "สรุปวันนี้", "แดชบอร์ด", "ช่วยเหลือ"]
 
 
 def dept_of(t):
@@ -153,6 +155,8 @@ class LineBot:
             return self.dept_text(*d)
         if t in ("ไม่อนุมัติ", "เหตุผล", "ปฏิเสธ", "ทำไมไม่ซื้อ", "ไม่ซื้อ"):
             return self.rejections_text()
+        if t in ("ประชุม", "ผลประชุม", "ประชุมai", "ควรเทรดตัวไหน", "เทรดตัวไหน", "ตัวไหนดี", "meeting"):
+            return self.meeting_text()
         if t in ("คาดการณ์", "พยากรณ์", "forecast", "คาดการ"):
             return self.forecast_text()
         if t in ("ตรวจไลน์", "ซ่อมไลน์", "ตรวจline", "doctor"):
@@ -211,6 +215,34 @@ class LineBot:
         text = "\n".join(out)
         return text[:4800], [SHORT[n] for _, n, _ in DEPTS if n != name] + ["แผนก", "สถานะ"]
 
+    def meeting_text(self):
+        co = self.co
+        if not co.gemini.key:
+            return ("♊ ยังไม่ได้ใส่ Gemini API key\n"
+                    "1) เปิด aistudio.google.com/apikey → Create API key (ฟรี)\n"
+                    "2) Termius → sudo bash /root/ai_trading_company/manage.sh → ข้อ 20 → วาง key")
+        m = co.acct.get("last_meeting")
+        if not m:
+            return "♊ ยังไม่มีการประชุม รอรอบที่ฝ่ายกลยุทธ์มีข้อเสนอซื้อ (และยังมีช่องว่างเปิดไม้)"
+        TH = {"buy": "🟢 ควรซื้อ", "wait": "🟡 รอก่อน", "avoid": "🔴 ไม่ควรแตะ"}
+        out = ["🤝 ประชุม AI ล่าสุด %s · ตลาด %s" % (m["t"][11:16], m.get("regime", "-"))]
+        if m.get("market"):
+            out.append("♊ มุมมองตลาด: " + m["market"])
+        if m.get("views"):
+            out.append("\n♊ Gemini วิเคราะห์ข้อเสนอ:")
+            for s, v in m["views"].items():
+                out.append("• %s %s %d%% – %s" % (s.replace(co.ex.quote, ""), TH.get(v["view"], v["view"]), v["confidence"], v["reason"]))
+        if m.get("minutes"):
+            out.append("\n🧠 ผลตัดสินร่วมกับ Claude:")
+            out += ["• " + x for x in m["minutes"]]
+        elif m.get("views"):
+            out.append("\n(Claude ไม่ได้ร่วมประชุม รอบนี้ใช้ความเห็น Gemini ตัดสิน)")
+        if m.get("watch"):
+            out.append("\n👀 น่าจับตา (ยังไม่ซื้อ):")
+            out += ["• %s – %s" % (w["symbol"].replace(co.ex.quote, ""), w["reason"]) for w in m["watch"]]
+        out.append("\nผ่านประชุมแล้วยังต้องผ่านฝ่ายความเสี่ยง (เพดานไม้/เงิน/สภาพคล่อง) ก่อนซื้อจริง")
+        return "\n".join(out)[:4800], ["Gemini", "AI", "ไม่อนุมัติ", "สถานะ"]
+
     def rejections_text(self):
         rows = self.co.acct.recent_decisions(15, only_rejected=True)
         if not rows:
@@ -261,6 +293,9 @@ class LineBot:
         alive = {n: t.is_alive() for n, (t, _) in co.threads.items()}
         lines.append("• " + " · ".join("%s %s" % (n, "✅" if a else "❌") for n, a in alive.items()))
         lines.append("• AI: %s" % ("✅ " + co.ai.model.split("-")[1].title() if co.ai.enabled else "ปิดอยู่"))
+        g = co.gemini
+        lines.append("• Gemini: %s" % (("✅ %s · วันนี้ %d ครั้ง" % (g.model, g.calls_today()) + (" ⚠️ " + g.last_err[:60] if g.last_err else ""))
+                                       if g.enabled else ("ปิดอยู่" if g.key else "ยังไม่ใส่ key (manage.sh ข้อ 20)")))
         lines.append("• แจ้งเตือนเมื่อ VPS ดับ: %s" % ("✅ ตั้งแล้ว" if os.environ.get("HEALTHCHECK_URL") else "ยังไม่ตั้ง (manage.sh ข้อ 18)"))
         if co.downtime_note:
             lines.append("• ⚠️ ครั้งล่าสุด: " + co.downtime_note)

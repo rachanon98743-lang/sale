@@ -35,6 +35,7 @@ while true; do
   echo "17) ตรวจ/ซ่อม LINE (กดปุ่มในแชทแล้วบอทไม่ตอบ)"
   echo "18) ตั้งแจ้งเตือนเมื่อ VPS ดับทั้งเครื่อง (healthchecks.io)"
   echo "19) เริ่มพอร์ตเงินจำลองใหม่ (ล้างไม้/ประวัติ เริ่มนับใหม่)"
+  echo "20) ใส่ Gemini API key (ฟรี จาก aistudio.google.com/apikey)"
   echo " 0) ออก"
   read -r -p "เลือก: " c
   case "$c" in
@@ -43,6 +44,12 @@ while true; do
        systemctl restart tradingbot; echo "บันทึกแล้ว" ;;
     2) read -r -p "Anthropic API Key: " k; setvar ANTHROPIC_API_KEY "$k"
        systemctl restart tradingbot; echo "บันทึกแล้ว" ;;
+    20) read -r -p "Gemini API Key: " k; k=$(echo "$k" | tr -d '[:space:]')
+       [ -n "$k" ] || { echo "ยกเลิก"; continue; }
+       code=$(curl -s -o /dev/null -w '%{http_code}' -H "x-goog-api-key: $k" https://generativelanguage.googleapis.com/v1beta/models)
+       [ "$code" = "200" ] && echo "✅ key ใช้ได้" || echo "⚠️ ตรวจ key ไม่ผ่าน (HTTP $code) บันทึกไว้ก่อน ดูผลใน log/LINE คำสั่ง สถานะ"
+       setvar GEMINI_API_KEY "$k"
+       systemctl restart tradingbot; echo "บันทึกแล้ว ฝ่ายวิเคราะห์ Gemini จะเริ่มร่วมประชุมรอบสแกนถัดไป" ;;
     3) read -r -p "โหมด (paper/testnet/live): " m
        case "$m" in
          paper|testnet) ;;

@@ -4,6 +4,7 @@ departments.py — แผนกต่างๆ ของบริษัท AI �
   1. ResearchDept   ฝ่ายวิจัยตลาด     สแกนทุกเหรียญ คำนวณอินดิเคเตอร์ ให้คะแนน + ดูภาวะตลาดรวม (BTC)
   2. StrategyDept   ฝ่ายกลยุทธ์        แปลงผลวิจัยเป็นข้อเสนอเทรด (จุดเข้า / ตัดขาดทุน / ทำกำไร)
   3. AIAnalystDept  ฝ่ายนักวิเคราะห์ AI  ให้ Claude ตรวจข้อเสนอก่อนอนุมัติ (ไม่บังคับ มีเพดานค่าใช้จ่าย)
+ 3b. GeminiAnalystDept ฝ่ายวิเคราะห์ Gemini  ความเห็นที่สองจาก Gemini (ฟรี) ส่งเข้าที่ประชุมกับ Claude ก่อนตัดสิน
   4. RiskDept       ฝ่ายบริหารความเสี่ยง  กฎเหล็ก: ขนาดไม้ จำนวนไม้ ขาดทุนสูงสุดต่อวัน ปุ่มหยุดฉุกเฉิน
   5. ExecutionDept  ฝ่ายเทรด            ส่งคำสั่งซื้อขายจริงไป Binance + ตั้ง stop loss บนกระดาน
   6. AccountingDept ฝ่ายบัญชี           บันทึกทุกการเทรดลง SQLite คำนวณกำไรขาดทุน
@@ -15,6 +16,7 @@ import os
 import sqlite3
 import threading
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone, timedelta
 
@@ -457,45 +459,95 @@ class AIAnalystDept:
 6) ใช้สถิติผลเทรดจริงของบอท (track_record) ถ้าแบบไหนแพ้บ่อย ให้ระวัง
 7) รักษาเงินต้นสำคัญกว่าทำกำไร: ถ้าไม่แน่ใจ ให้ปฏิเสธ"""
 
-    def review(self, proposals, regime, track=None):
-        if not self.enabled or not proposals:
+    GEMINI_TH = {"buy": "ควรซื้อ", "wait": "รอก่อน", "avoid": "ไม่ควรแตะ"}
+    GEMINI_DEPT = "ฝ่ายวิเคราะห์ Gemini"
+
+    def _gemini_only(self, proposals, views, why):
+        """ไม่มี Claude (ปิด/เกินงบ/เรียกไม่ได้): ใช้ความเห็น Gemini ตัดสิน ซื้อเฉพาะตัวที่ Gemini ว่า 'ควรซื้อ'"""
+        approved = []
+        for p in proposals:
+            v = views.get(p["symbol"])
+            if v is None or v["view"] == "buy":
+                p["ai_reason"] = ("Gemini: " + v["reason"]) if v else ""
+                approved.append(p)
+                self.acct.add_decision(self.GEMINI_DEPT, p["symbol"], True, p["ai_reason"] or "ผ่าน")
+            else:
+                self.acct.add_decision(self.GEMINI_DEPT, p["symbol"], False,
+                                       "Gemini %s: %s" % (self.GEMINI_TH[v["view"]], v["reason"]))
+        self.log(self.name, "%s → ใช้ความเห็น Gemini ตัดสิน อนุมัติ %d/%d" % (why, len(approved), len(proposals)))
+        return approved
+
+    def review(self, proposals, regime, track=None, gemini=None):
+        """ประชุมตัดสิน: Gemini วิเคราะห์ก่อน (ถ้ามี) → Claude อ่านความเห็น Gemini แล้วตัดสินขั้นสุดท้าย
+        Gemini ค้านแรง (ไม่ควรแตะ + มั่นใจ >= gemini_veto_conf) = ไม่ซื้อ แม้ Claude อนุมัติ"""
+        views = (gemini or {}).get("views") or {}
+        self.last_meeting = None
+        if not proposals:
             return proposals
+        if not self.enabled:
+            return self._gemini_only(proposals, views, "Claude ปิดอยู่") if views else proposals
         _, _, over = self.budget_status()
         if over:
+            if views:
+                return self._gemini_only(proposals, views, "Claude ถึงเพดาน (%s)" % ", ".join(over))
             self.log(self.name, "ถึงเพดาน (%s) หยุดเรียก AI อนุมัติตามกฎอย่างเดียว" % ", ".join(over))
             return proposals
         keys = ("symbol", "price", "score", "setup", "why", "sl_pct", "tp_pct", "rsi", "mom", "chg24", "ext", "htf",
                 "structure", "adx", "rs_btc", "support", "resistance", "warn", "bt")
         brief = [{k: (round(p[k], 4) if isinstance(p[k], float) else p[k]) for k in keys if k in p} for p in proposals[:8]]
+        meeting = ""
+        if views:
+            meeting = ("\n\nที่ประชุม: นักวิเคราะห์ Gemini (คนละโมเดล วิเคราะห์อิสระมาก่อน) ให้ความเห็นดังนี้\n%s\n"
+                       "มุมมองตลาดของ Gemini: %s\n"
+                       "ชั่งน้ำหนักความเห็นนี้ด้วย ถ้าคุณเห็นต่างจาก Gemini ให้บอกในเหตุผลว่าทำไม"
+                       ) % (json.dumps(views, ensure_ascii=False), (gemini or {}).get("market", "-"))
         prompt = (
             "คุณเป็นผู้จัดการความเสี่ยงของกองทุนคริปโต ประสบการณ์เทรด spot มา 15 ปี\n%s\n\n"
             "ภาวะตลาดรวมตอนนี้ (BTC รายวัน): %s\nสถิติผลเทรดจริงของบอท: %s\n"
             "ข้อเสนอซื้อจากระบบ (score 0-100, sl_pct/tp_pct เป็นสัดส่วน, mom = โมเมนตัม 10 แท่ง, chg24 = %% เปลี่ยน 24 ชม., "
             "ext = ระยะห่างจาก EMA20, htf = แนวโน้ม timeframe ใหญ่, structure = โครงสร้างยอด-ฐาน, rs_btc = แข็งกว่า BTC, "
             "support/resistance = แนวรับ/ต้านใกล้สุด, why = เช็กลิสต์ที่ผ่าน, warn = จุดอันตราย, "
-            "bt = ผลทดสอบย้อนหลังสัญญาณเดียวกันบนเหรียญนี้: p_win โอกาสชนะ, ev กำไรคาดหวังต่อไม้):\n%s\n\n"
+            "bt = ผลทดสอบย้อนหลังสัญญาณเดียวกันบนเหรียญนี้: p_win โอกาสชนะ, ev กำไรคาดหวังต่อไม้):\n%s%s\n\n"
             "ตัดสินทีละตัว เหตุผลภาษาไทยสั้นๆ อ่านง่าย (ไม่เกิน 25 คำ) อ้างตัวเลขที่ใช้ตัดสิน\n"
             "ตอบเป็น JSON อย่างเดียว รูปแบบ: {\"decisions\":[{\"symbol\":\"XXXUSDT\",\"approve\":true,\"reason\":\"...\"}]}"
-        ) % (self.PLAYBOOK, regime, json.dumps(track or {}, ensure_ascii=False), json.dumps(brief, ensure_ascii=False))
+        ) % (self.PLAYBOOK, regime, json.dumps(track or {}, ensure_ascii=False), json.dumps(brief, ensure_ascii=False), meeting)
         try:
-            text = self._call(prompt, purpose="ตรวจข้อเสนอซื้อ %d ตัว" % len(brief))
+            text = self._call(prompt, purpose="ประชุมตรวจข้อเสนอซื้อ %d ตัว%s" % (len(brief), " (มีความเห็น Gemini)" if views else ""))
             j = json.loads(text[text.index("{"):text.rindex("}") + 1])
             dec = {d["symbol"]: d for d in j.get("decisions", [])}
         except Exception as e:
+            if views:
+                return self._gemini_only(proposals, views, "เรียก Claude ไม่สำเร็จ (%s)" % e)
             self.log(self.name, "เรียก Claude ไม่สำเร็จ (%s) อนุมัติตามกฎอย่างเดียว" % e)
             return proposals
-        approved = []
+        veto = int(self.setting("gemini_veto_conf", 80))
+        approved, minutes = [], []
         for p in proposals:
-            d = dec.get(p["symbol"])
-            if d is None or d.get("approve"):
-                p["ai_reason"] = (d or {}).get("reason", "")
+            s = p["symbol"]
+            d, g = dec.get(s), views.get(s)
+            ok = d is None or bool(d.get("approve"))
+            reason = (d or {}).get("reason", "")
+            vetoed = ok and g and g["view"] == "avoid" and g["confidence"] >= veto
+            if vetoed:
+                ok, reason = False, "Gemini ค้าน (มั่นใจ %d%%): %s · Claude เคยให้ผ่าน: %s" % (g["confidence"], g["reason"], reason)
+            if g:
+                minutes.append("%s · Gemini %s %d%% · Claude %s → %s" % (
+                    s, self.GEMINI_TH[g["view"]], g["confidence"], "ผ่าน" if (d is None or d.get("approve")) else "ไม่ผ่าน",
+                    "✅ ซื้อ" if ok else "❌ ไม่ซื้อ"))
+            if ok:
+                p["ai_reason"] = reason
+                if g:
+                    p["gemini"] = "%s %d%%: %s" % (self.GEMINI_TH[g["view"]], g["confidence"], g["reason"])
                 approved.append(p)
-                self.acct.add_decision(self.name, p["symbol"], True, p["ai_reason"] or "ผ่าน")
-                if p["ai_reason"]:
-                    self.log(self.name, "อนุมัติ %s: %s" % (p["symbol"], p["ai_reason"]))
+                self.acct.add_decision(self.name, s, True, reason or "ผ่าน")
+                if reason:
+                    self.log(self.name, "อนุมัติ %s: %s" % (s, reason))
             else:
-                self.log(self.name, "ปฏิเสธ %s: %s" % (p["symbol"], d.get("reason", "")))
-                self.acct.add_decision(self.name, p["symbol"], False, d.get("reason", "") or "ไม่ระบุเหตุผล")
+                self.log(self.name, "ปฏิเสธ %s: %s" % (s, reason))
+                self.acct.add_decision(self.GEMINI_DEPT if vetoed else self.name, s, False, reason or "ไม่ระบุเหตุผล")
+        if minutes:
+            self.log("CEO", "สรุปประชุม AI: " + " | ".join(minutes))
+            self.last_meeting = minutes
         self.log(self.name, "อนุมัติ %d/%d (ค่า AI วันนี้ $%.4f)" % (len(approved), len(proposals), self.acct.ai_cost_today()))
         return approved
 
@@ -507,6 +559,118 @@ class AIAnalystDept:
                               "บอกสิ่งที่ได้ผล สิ่งที่ควรระวัง ห้ามแนะนำเพิ่มความเสี่ยง:\n" + json.dumps(summary, ensure_ascii=False), max_tokens=500)
         except Exception:
             return None
+
+
+# ===================================================================== 3b. Gemini Analyst (ความเห็นที่สอง)
+class GeminiAnalystDept:
+    """นักวิเคราะห์คนที่ 2 (Google Gemini) วิเคราะห์ข้อเสนออิสระก่อน แล้วส่งความเห็นเข้าที่ประชุมกับ Claude
+    ใช้ GEMINI_API_KEY (ฟรีจาก aistudio.google.com) ถ้าไม่มี key แผนกนี้จะข้ามไปเฉยๆ ไม่กระทบระบบเดิม"""
+    name = "ฝ่ายวิเคราะห์ Gemini"
+    FALLBACK = ("gemini-flash-latest", "gemini-2.5-flash", "gemini-3-flash-preview", "gemini-2.5-flash-lite")
+    URL = "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent"
+
+    def __init__(self, cfg, acct, log):
+        self.key = os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")
+        self.cfg, self.acct, self.log = cfg, acct, log
+        self.working = None  # ชื่อรุ่นที่เรียกได้จริงล่าสุด
+        self.last_err = ""
+
+    def setting(self, k, default):
+        v = self.acct.get("set_" + k)
+        return self.cfg.get(k, default) if v is None else v
+
+    @property
+    def model(self):
+        return self.working or self.setting("gemini_model", "gemini-flash-latest")
+
+    @property
+    def enabled(self):
+        return bool(self.key) and bool(self.setting("gemini_enabled", True))
+
+    def calls_today(self):
+        return self.acct.ai_usage(gemini=True)["day_calls"]
+
+    def _call(self, prompt, purpose="", max_tokens=2048):
+        lim = int(self.setting("gemini_daily_calls", 200))  # โควตาฟรีราว 250 ครั้ง/วัน
+        if self.calls_today() >= lim:
+            raise RuntimeError("ครบเพดาน %d ครั้ง/วัน" % lim)
+        body = json.dumps({"contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                           "generationConfig": {"temperature": 0.2, "maxOutputTokens": max_tokens,
+                                                "responseMimeType": "application/json"}}).encode()
+        tried, err = [], None
+        for m in dict.fromkeys((self.model, self.setting("gemini_model", "gemini-flash-latest")) + self.FALLBACK):
+            tried.append(m)
+            req = urllib.request.Request(self.URL % m, data=body, method="POST",
+                                         headers={"x-goog-api-key": self.key, "content-type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=60) as r:
+                    data = json.loads(r.read())
+            except urllib.error.HTTPError as e:
+                err = "HTTP %s %s" % (e.code, e.read()[:150].decode("utf-8", "ignore"))
+                if e.code == 404:   # รุ่นนี้ไม่มี/เลิกใช้แล้ว ลองรุ่นถัดไป
+                    continue
+                raise RuntimeError(err)
+            self.working = m
+            us = data.get("usageMetadata", {})
+            tin = us.get("promptTokenCount", 0)
+            tout = us.get("candidatesTokenCount", 0) + us.get("thoughtsTokenCount", 0)
+            parts = ((data.get("candidates") or [{}])[0].get("content") or {}).get("parts", [])
+            text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
+            self.acct.add_ai_call(purpose, m, tin, tout, 0.0, text[:600])  # โควตาฟรี ไม่มีค่าใช้จ่าย
+            return text
+        raise RuntimeError("ไม่มีรุ่น Gemini ที่ใช้ได้ (%s): %s" % (", ".join(tried), err))
+
+    def analyze(self, proposals, regime, track=None, research=None):
+        """คืน {"views": {symbol: {"view": buy/wait/avoid, "confidence": 0-100, "reason": ...}}, "watch": [...], "market": "..."}"""
+        if not self.enabled or not proposals:
+            return None
+        keys = ("symbol", "price", "score", "setup", "why", "sl_pct", "tp_pct", "rsi", "mom", "chg24", "ext", "htf",
+                "structure", "adx", "rs_btc", "support", "resistance", "warn", "bt")
+        rnd = lambda p: {k: (round(p[k], 4) if isinstance(p[k], float) else p[k]) for k in keys if k in p}
+        brief = [rnd(p) for p in proposals[:8]]
+        prop_syms = {p["symbol"] for p in proposals}
+        others = [rnd(r) for r in (research or []) if r.get("symbol") not in prop_syms][:12]
+        prompt = (
+            "คุณเป็นนักวิเคราะห์คริปโตอาวุโสของกองทุน เทรด spot เท่านั้น (ไม่มี short ไม่มีเลเวอเรจ) "
+            "หน้าที่: วิเคราะห์อิสระแล้วส่งความเห็นเข้าที่ประชุมกับผู้จัดการความเสี่ยงอีกคน\n%s\n\n"
+            "ภาวะตลาดรวม (BTC รายวัน): %s\nสถิติผลเทรดจริงของบอท: %s\n"
+            "ข้อเสนอซื้อจากฝ่ายกลยุทธ์ (score 0-100, sl_pct/tp_pct เป็นสัดส่วน, chg24 = %% เปลี่ยน 24 ชม., ext = ระยะห่างจาก EMA20, "
+            "htf = แนวโน้ม timeframe ใหญ่, rs_btc = แข็งกว่า BTC, bt = ผลทดสอบย้อนหลัง p_win/ev):\n%s\n\n"
+            "เหรียญอื่นที่ฝ่ายวิจัยสแกนเจอแต่ยังไม่ผ่านเกณฑ์เสนอซื้อ:\n%s\n\n"
+            "1) ให้ความเห็นข้อเสนอทีละตัว view = buy (ควรซื้อ) / wait (รอจังหวะ) / avoid (ไม่ควรแตะ) "
+            "confidence 0-100 และเหตุผลภาษาไทยสั้นๆ ไม่เกิน 25 คำ อ้างตัวเลข\n"
+            "2) เลือกเหรียญน่าจับตาจากรายการอื่นไม่เกิน 3 ตัว (ถ้าไม่มีให้ว่าง) บอกว่ารอสัญญาณอะไร\n"
+            "3) สรุปมุมมองตลาด 1 ประโยค\n"
+            "ตอบ JSON อย่างเดียว: {\"views\":[{\"symbol\":\"XXXUSDT\",\"view\":\"buy\",\"confidence\":70,\"reason\":\"...\"}],"
+            "\"watch\":[{\"symbol\":\"YYYUSDT\",\"reason\":\"...\"}],\"market\":\"...\"}"
+        ) % (AIAnalystDept.PLAYBOOK, regime, json.dumps(track or {}, ensure_ascii=False),
+             json.dumps(brief, ensure_ascii=False), json.dumps(others, ensure_ascii=False))
+        try:
+            text = self._call(prompt, purpose="วิเคราะห์ข้อเสนอ %d ตัว + หาเหรียญน่าจับตา" % len(brief))
+            j = json.loads(text[text.index("{"):text.rindex("}") + 1])
+        except Exception as e:
+            self.last_err = str(e)[:200]
+            self.log(self.name, "วิเคราะห์ไม่สำเร็จ (%s) ที่ประชุมใช้ความเห็น Claude/กฎอย่างเดียว" % self.last_err)
+            return None
+        self.last_err = ""
+        views = {}
+        for v in j.get("views", []):
+            if v.get("symbol") in prop_syms:
+                view = str(v.get("view", "wait")).lower()
+                views[v["symbol"]] = {"view": view if view in ("buy", "wait", "avoid") else "wait",
+                                      "confidence": max(0, min(100, int(v.get("confidence") or 0))),
+                                      "reason": str(v.get("reason", ""))[:200]}
+        TH_VIEW = {"buy": "ควรซื้อ", "wait": "รอก่อน", "avoid": "ไม่ควรแตะ"}
+        for s, v in views.items():
+            self.log(self.name, "%s: %s (มั่นใจ %d%%) %s" % (s, TH_VIEW[v["view"]], v["confidence"], v["reason"]))
+        watch = [{"symbol": w.get("symbol"), "reason": str(w.get("reason", ""))[:200]}
+                 for w in j.get("watch", []) if w.get("symbol")][:3]
+        if watch:
+            self.log(self.name, "น่าจับตา: " + " · ".join("%s (%s)" % (w["symbol"], w["reason"]) for w in watch))
+        market = str(j.get("market", ""))[:200]
+        if market:
+            self.log(self.name, "มุมมองตลาด: " + market)
+        return {"views": views, "watch": watch, "market": market}
 
 
 # ===================================================================== 4. Risk
@@ -645,6 +809,7 @@ class ExecutionDept:
                 bt["p_win"] * 100, spent * o["tp_pct"], spent * o["sl_pct"], spent * bt.get("ev", 0), bt.get("ev", 0) * 100)
         why = ("\n🎯 จังหวะ: %s · ผ่านเช็กลิสต์ %s · คะแนน %s" % (o["setup"], o.get("checks", "-"), o.get("score"))) if o.get("setup") else ""
         why += ("\n🧠 AI: " + o["ai_reason"]) if o.get("ai_reason") else ""
+        why += ("\n♊ Gemini: " + o["gemini"]) if o.get("gemini") else ""
         self.log(self.name, "🟢 ซื้อ %s %.6g @ %.6g ใช้ %.2f | SL %.6g TP %.6g %s%s%s" % (
             s, qty, px, spent, sl, tp, "(OCO บนกระดาน)" if oco else "(เฝ้าเอง)", fc, why), line=True)
         return pid
@@ -811,10 +976,14 @@ class AccountingDept:
     def add_ai_call(self, purpose, model, tin, tout, usd, result):
         self._x("INSERT INTO ai_calls VALUES(?,?,?,?,?,?,?)", (now_th().isoformat(timespec="seconds"), purpose, model, tin, tout, usd, result))
 
-    def ai_usage(self):
+    def ai_usage(self, gemini=False):
+        """gemini=False = นับเฉพาะ Claude (งบที่เสียเงิน) · gemini=True = นับเฉพาะ Gemini (โควตาฟรี)"""
         d = now_th().date().isoformat()
-        r1 = self._one("SELECT COALESCE(SUM(usd),0) u, COALESCE(SUM(tin+tout),0) t, COUNT(*) n FROM ai_calls WHERE t >= ?", (d,))
-        r2 = self._one("SELECT COALESCE(SUM(usd),0) u, COALESCE(SUM(tin+tout),0) t FROM ai_calls WHERE t >= ?", (d[:7] + "-01",))
+        w = "AND model %s LIKE 'gemini%%'" % ("" if gemini else "NOT")
+        r1 = self._one("SELECT COALESCE(SUM(usd),0) u, COALESCE(SUM(tin+tout),0) t, COUNT(*) n FROM ai_calls WHERE t >= ? " + w, (d,))
+        r2 = self._one("SELECT COALESCE(SUM(usd),0) u, COALESCE(SUM(tin+tout),0) t FROM ai_calls WHERE t >= ? " + w, (d[:7] + "-01",))
+        if gemini:
+            return {"day_usd": 0.0, "day_tokens": r1["t"], "day_calls": r1["n"], "month_usd": 0.0, "month_tokens": r2["t"]}
         return {"day_usd": max(r1["u"], self.ai_cost_today()), "day_tokens": r1["t"], "day_calls": r1["n"],
                 "month_usd": r2["u"], "month_tokens": r2["t"]}
 

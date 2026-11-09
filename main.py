@@ -21,7 +21,7 @@ import time
 import traceback
 
 from binance_client import Binance, BinanceError
-from departments import (RISK_PROFILES, AccountingDept, AIAnalystDept, ExecutionDept, ResearchDept,
+from departments import (RISK_PROFILES, AccountingDept, AIAnalystDept, ExecutionDept, GeminiAnalystDept, ResearchDept,
                          RiskDept, StrategyDept, liquidity_check, now_th, th_hm)
 import dashboard
 from notifier import LineNotifier
@@ -58,6 +58,7 @@ class Company:
         self.research = ResearchDept(self.ex, self.log, cfg)
         self.strategy = StrategyDept(self.log, self.acct, cfg)
         self.ai = AIAnalystDept(cfg, self.acct, self.log)
+        self.gemini = GeminiAnalystDept(cfg, self.acct, self.log)
         self.riskd = RiskDept(cfg, self.acct, self.log)
         self.exe = ExecutionDept(self.ex, self.acct, self.log, cfg)
         self.regime = "neutral"
@@ -210,7 +211,14 @@ class Company:
         props = self.strategy.proposals(self.last_research, self.risk, held, self.regime)
         n_prop = len(props)
         if props and self.riskd.slots_left(self.risk, self.regime, len(held)) > 0:
-            props = self.ai.review(props, self.regime, self.acct.track_record())
+            track = self.acct.track_record()
+            g = self.gemini.analyze(props, self.regime, track, self.last_research)  # Gemini วิเคราะห์ก่อน
+            props = self.ai.review(props, self.regime, track, gemini=g)          # แล้วประชุมกับ Claude
+            if g:
+                self.acct.set("last_meeting", {"t": now_th().isoformat(timespec="seconds"), "regime": self.regime,
+                                               "market": g.get("market", ""), "watch": g.get("watch", []),
+                                               "views": g.get("views", {}), "minutes": getattr(self.ai, "last_meeting", None) or [],
+                                               "bought_candidates": [p["symbol"] for p in props]})
         # ถือเต็มแล้ว: ไม่ต้องเสียค่า AI ตรวจ ให้ฝ่ายบริหารความเสี่ยงแจ้งเหตุผลเลย
         orders = self.riskd.approve(props, self.risk, self.regime, self.acct.open_positions(),
                                     self.ex.usdt_free(), eq, self.ex.filters)
@@ -233,7 +241,7 @@ class Company:
                 self.log("ฝ่ายเทรด", "ซื้อ %s ไม่สำเร็จ: %s" % (o["symbol"], e))
                 self.acct.add_decision("ฝ่ายเทรด", o["symbol"], False, "ส่งคำสั่งซื้อไม่สำเร็จ: %s" % e)
         # CEO สรุปงานทุกรอบ: เห็นว่าบอททำงานอยู่ แม้ไม่มีใครเปิดแดชบอร์ด
-        self.log("CEO", "สั่งงานรอบนี้: วิจัย %d เหรียญ → กลยุทธ์เสนอ %d → ผ่าน AI %d → ซื้อ %d%s · ถือ %d/%d ไม้ · ตลาด %s" % (
+        self.log("CEO", "สั่งงานรอบนี้: วิจัย %d เหรียญ → กลยุทธ์เสนอ %d → ผ่านประชุม AI %d → ซื้อ %d%s · ถือ %d/%d ไม้ · ตลาด %s" % (
             len(self.last_research), n_prop, n_ok, len(bought), (" (%s)" % ", ".join(bought)) if bought else "",
             len(self.acct.open_positions()), RISK_PROFILES[self.risk]["max_pos"], self.regime))
         self.save_paper()
