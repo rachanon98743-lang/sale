@@ -372,14 +372,39 @@ def _ts(*args, timeout=25):
     return subprocess.run(["tailscale"] + list(args), capture_output=True, text=True, timeout=timeout)
 
 
-def _funnel_ok(port):
+HOOK_PATH = "/line/webhook"
+
+
+def _funnel_ok(port, path=HOOK_PATH):
+    """ทางเข้าจากอินเทอร์เน็ตต้องส่ง path ของบอทนี้มาที่พอร์ตของบอทนี้จริง
+    (ถ้าโปรแกรมอื่นบนเครื่อง เช่นบอทหุ้น ไปยึด path หลัก '/' จะเห็นว่าไม่ผ่าน)"""
     try:
         st = json.loads(_ts("funnel", "status", "--json").stdout or "{}")
     except Exception:
         return False
-    allow = any(st.get("AllowFunnel", {}).values())
-    proxies = json.dumps(st.get("Web", {}))
-    return allow and (":%d" % port) in proxies
+    if not any(st.get("AllowFunnel", {}).values()):
+        return False
+    for web in (st.get("Web") or {}).values():
+        h = web.get("Handlers") or {}
+        own = (h.get(path) or {}).get("Proxy", "")
+        if own:
+            return (":%d" % port) in own
+        if (":%d" % port) in (h.get("/") or {}).get("Proxy", ""):
+            return True
+    return False
+
+
+def _open_funnel(port, path=HOOK_PATH):
+    """เปิด Funnel เฉพาะ path ของบอทนี้ ไม่ทับของโปรแกรมอื่นที่ใช้ Tailscale ร่วมเครื่อง"""
+    target = "http://127.0.0.1:%d%s" % (port, path)
+    for args in (["funnel", "--bg", "--yes", "--set-path=" + path, target],
+                 ["funnel", "--bg", "--set-path=" + path, target],
+                 ["funnel", "--bg", "--yes", str(port)],  # tailscale รุ่นเก่าไม่มี --set-path
+                 ["funnel", "--bg", str(port)]):
+        r = _ts(*args)
+        if _funnel_ok(port, path):
+            return r
+    return r
 
 
 def doctor(bot, fix=True):
@@ -409,9 +434,7 @@ def doctor(bot, fix=True):
     if _funnel_ok(port):
         out.append((True, "Tailscale Funnel เปิดอยู่ → พอร์ต %d" % port))
     elif fix:
-        r = _ts("funnel", "--bg", "--yes", str(port))
-        if r.returncode != 0 and "yes" in (r.stderr or ""):
-            r = _ts("funnel", "--bg", str(port))
+        r = _open_funnel(port)
         txt = (r.stdout or "") + (r.stderr or "")
         if _funnel_ok(port):
             out.append((True, "Funnel หลุดอยู่ เปิดใหม่ให้แล้ว → พอร์ต %d" % port))
@@ -425,7 +448,13 @@ def doctor(bot, fix=True):
     # 4) Webhook URL ใน LINE ตรงกับเครื่องนี้ไหม (แก้ให้อัตโนมัติผ่าน API)
     try:
         info = _line_api(bot, "GET", "/channel/webhook/endpoint")
-        if info.get("endpoint") != expected:
+        cur = info.get("endpoint") or ""
+        if cur != expected and "/webull/" in cur:
+            out.append((False, "Webhook ของ LINE OA นี้ถูกบอทหุ้นยึดไป (%s) ตั้งกลับมาที่บอทคริปโตแล้ว "
+                               "ถ้าอยากสั่งงานบอทหุ้นในแชทด้วย ให้สร้าง LINE OA ใหม่ให้บอทหุ้น" % cur))
+            if fix:
+                _line_api(bot, "PUT", "/channel/webhook/endpoint", {"endpoint": expected})
+        elif cur != expected:
             if fix:
                 _line_api(bot, "PUT", "/channel/webhook/endpoint", {"endpoint": expected})
                 out.append((True, "แก้ Webhook URL ใน LINE เป็น %s แล้ว (เดิม %s)" % (expected, info.get("endpoint") or "ว่าง")))
@@ -474,6 +503,29 @@ def doctor_loop(bot):
         except Exception as e:
             bot.co.log("CEO", "ตรวจ LINE ไม่สำเร็จ: %s" % e)
         time.sleep(1800)
+
+
+def funnel_guard_loop(bot):
+    """เฝ้าทางเข้า LINE ทุก 2 นาที: ถ้าโปรแกรมอื่นบนเครื่อง (เช่นบอทหุ้น) หรืออะไรก็ตามเปลี่ยน Funnel ไป
+    จนข้อความจากแชทมาไม่ถึงบอทนี้ จะซ่อมกลับเองทันที ไม่ต้องรอรอบตรวจใหญ่ 30 นาที หรือกด manage.sh ข้อ 17"""
+    time.sleep(90)
+    while True:
+        try:
+            if not _funnel_ok(bot.port):
+                who = ""
+                try:
+                    st = json.loads(_ts("funnel", "status", "--json").stdout or "{}")
+                    for web in (st.get("Web") or {}).values():
+                        who = ((web.get("Handlers") or {}).get("/") or {}).get("Proxy", "") or who
+                except Exception:
+                    pass
+                _open_funnel(bot.port)
+                ok = _funnel_ok(bot.port)
+                bot.co.log("CEO", "ทางเข้า LINE หลุด%s %s" % (
+                    (" (ถูกเปลี่ยนไปที่ %s)" % who) if who else "", "ซ่อมกลับแล้ว ✅" if ok else "ซ่อมไม่สำเร็จ ❌"))
+        except Exception as e:
+            bot.co.log("CEO", "เฝ้าทางเข้า LINE ไม่สำเร็จ: %s" % e)
+        time.sleep(120)
 
 
 def status_bar_loop(bot, every_min):
@@ -554,8 +606,9 @@ def serve(company, port=8090):
             return self.rfile.read(n) if n else b""
 
         def do_POST(self):
-            if self.path.rstrip("/") not in ("/line/webhook", "/webhook"):
-                return self._ok(404)
+            p = self.path.split("?")[0].rstrip("/")
+            if p not in ("", "/line/webhook", "/webhook") and not p.endswith("/webhook"):
+                return self._ok(404)  # Funnel แบบ set-path อาจส่ง path มาแบบตัดหรือไม่ตัด prefix: รับทั้งสองแบบ
             body = self._read_body()
             sig = self.headers.get("X-Line-Signature")
             if not bot.verify(body, sig):
@@ -576,6 +629,7 @@ def serve(company, port=8090):
     srv = ThreadingHTTPServer(("127.0.0.1", port), H)
     company.keep_thread("รับคำสั่ง LINE", srv.serve_forever)
     threading.Thread(target=doctor_loop, args=(bot,), daemon=True).start()
+    threading.Thread(target=funnel_guard_loop, args=(bot,), daemon=True).start()
     every = int(company.cfg.get("line_status_bar_min", 0) or 0)
     if every > 0:
         threading.Thread(target=status_bar_loop, args=(bot, max(1, every)), daemon=True).start()

@@ -34,6 +34,7 @@ while true; do
   echo "16) ติดตั้งริชเมนู LINE ใหม่ (มีปุ่มเปิดแดชบอร์ด)"
   echo "17) ตรวจ/ซ่อม LINE (กดปุ่มในแชทแล้วบอทไม่ตอบ)"
   echo "18) ตั้งแจ้งเตือนเมื่อ VPS ดับทั้งเครื่อง (healthchecks.io)"
+  echo "19) เริ่มพอร์ตเงินจำลองใหม่ (ล้างไม้/ประวัติ เริ่มนับใหม่)"
   echo " 0) ออก"
   read -r -p "เลือก: " c
   case "$c" in
@@ -139,6 +140,13 @@ PY2
         read -r -p "Ping URL (https://hc-ping.com/...): " u
         case "$u" in https://*) setvar HEALTHCHECK_URL "$u"; systemctl restart tradingbot; echo "บันทึกแล้ว" ;;
           *) echo "ยกเลิก" ;; esac ;;
+    19) [ "$(mode)" = paper ] || { echo "รีเซ็ตได้เฉพาะโหมด paper (ตอนนี้ $(mode))"; continue; }
+        read -r -p "เงินเริ่มต้น (เว้นว่าง = ค่าเดิมใน config): " amt
+        read -r -p "ยืนยันล้างพอร์ตจำลองแล้วเริ่มใหม่? พิมพ์ y: " ok
+        [ "$ok" = y ] || { echo "ยกเลิก"; continue; }
+        systemctl stop tradingbot
+        ( set -a; . "$ENV"; set +a; cd "$DIR" && python3 main.py --mode paper --reset-paper ${amt:+$amt} )
+        systemctl start tradingbot; echo "เปิดบอทแล้ว" ;;
     0) exit 0 ;;
   esac
 done

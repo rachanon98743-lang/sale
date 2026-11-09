@@ -406,6 +406,36 @@ def confirm_live(cfg):
         sys.exit("ยกเลิก")
 
 
+def reset_paper(cfg, amount):
+    """เริ่มพอร์ตจำลองใหม่: สำรองฐานข้อมูลเดิม แล้วล้างไม้/ประวัติเทรด/กราฟพอร์ต/เงินจำลอง
+    เก็บไว้: log การทำงาน และค่าใช้จ่าย AI (ให้งบ AI ยังนับถูก)"""
+    import shutil
+    if cfg["mode"] != "paper":
+        sys.exit("❌ ตอนนี้เป็นโหมด %s รีเซ็ตได้เฉพาะโหมด paper (เงินจำลอง)" % cfg["mode"])
+    ex_name = cfg.get("exchange", "binance")
+    tag = "paper" if ex_name == "binance" else "%s_paper" % ex_name
+    if ex_name == "binance_th" and (cfg.get("quote") or "THB") != "THB":
+        tag += "_" + cfg["quote"].lower()
+    path = os.path.join(HERE, "company_%s.db" % tag)
+    th_baht = ex_name == "binance_th" and (cfg.get("quote") or "THB") == "THB"
+    quote = "THB" if th_baht else (cfg.get("quote") or "USDT")
+    if amount is None or amount <= 0:
+        amount = cfg.get("paper_balance_th", 30000) if th_baht else cfg.get("paper_balance", 1000)
+    if os.path.exists(path):
+        bak = path.replace(".db", "_backup_%s.db" % now_th().strftime("%Y%m%d_%H%M"))
+        shutil.copy2(path, bak)
+        print("สำรองข้อมูลเดิมไว้ที่ %s" % os.path.basename(bak))
+    acct = AccountingDept(path)
+    with acct.lock:
+        for sql in ("DELETE FROM positions", "DELETE FROM equity", "DELETE FROM decisions",
+                    "DELETE FROM kv WHERE k='paper_wallet' OR k LIKE 'day_start_%' OR k='report_day'"):
+            acct.db.execute(sql)
+        acct.db.commit()
+    acct.set("paper_wallet", {quote: float(amount)})
+    acct.log("CEO", "เริ่มพอร์ตจำลองใหม่ เงินเริ่มต้น %.2f %s" % (amount, quote))
+    print("✅ เริ่มพอร์ตจำลองใหม่แล้ว เงินเริ่มต้น %.2f %s" % (amount, quote))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default=os.path.join(HERE, "config.json"))
@@ -416,6 +446,8 @@ def main():
     ap.add_argument("--exchange", choices=["binance", "binance_th"])
     ap.add_argument("--markets", action="store_true", help="แสดงคู่เหรียญทั้งหมดที่ API เปิดให้")
     ap.add_argument("--test-line", action="store_true", help="ส่งข้อความทดสอบเข้า LINE")
+    ap.add_argument("--reset-paper", type=float, metavar="เงินเริ่มต้น", nargs="?", const=-1,
+                    help="เริ่มพอร์ตเงินจำลองใหม่ (สำรองฐานข้อมูลเดิมไว้) ใส่จำนวนเงินเริ่มต้นได้")
     ap.add_argument("--host", default="127.0.0.1", help="0.0.0.0 = เปิดให้เครื่องอื่นเข้าได้ (ต้องตั้ง DASHBOARD_PASSWORD)")
     a = ap.parse_args()
     cfg = load_config(a.config)
@@ -426,6 +458,9 @@ def main():
         cfg["risk"] = a.risk
     if a.exchange:
         cfg["exchange"] = a.exchange
+    if a.reset_paper is not None:
+        reset_paper(cfg, a.reset_paper)
+        return
     if a.markets:
         ex = Binance("paper", exchange=cfg.get("exchange", "binance"), quote=cfg.get("quote"))
         for k, v in ex.list_markets().items():
