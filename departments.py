@@ -711,13 +711,13 @@ class GeminiAnalystDept:
     def budget_status(self):
         """การใช้ Gemini เทียบเพดาน: ครั้ง/วัน, token/วัน, token/เดือน, ค่าใช้จ่ายประมาณ (ถ้าเปิดจ่ายเงิน)"""
         u = self.acct.ai_usage(gemini=True)
-        lim = {"day_calls": int(self.setting("gemini_daily_calls", 200)),          # โควตาฟรีราว 250 ครั้ง/วัน
+        lim = {"day_calls": int(self.setting("gemini_daily_calls", 300)),          # แบบจ่ายเงิน: ไม่ติดโควตาฟรี 250 ครั้ง
                "day_tokens": int(self.setting("gemini_daily_token_limit", 1000000)),
                "month_tokens": int(self.setting("gemini_monthly_token_limit", 20000000)),
-               "day_usd": float(self.setting("gemini_daily_budget_usd", 0.5)),
+               "day_usd": float(self.setting("gemini_daily_budget_usd", 0.3)),
                "month_usd": float(self.setting("gemini_monthly_budget_usd", 5)),
                "max_tokens_per_call": int(self.setting("gemini_max_tokens_per_call", 2048)),
-               "paid": bool(self.setting("gemini_paid", False))}
+               "paid": bool(self.setting("gemini_paid", True))}  # เจ้าของอัปเกรด Gemini API เป็นแบบจ่ายเงินแล้ว
         over = []
         if u["day_calls"] >= lim["day_calls"]: over.append("%d ครั้ง/วัน" % lim["day_calls"])
         if u["day_tokens"] >= lim["day_tokens"]: over.append("token รายวัน %d" % lim["day_tokens"])

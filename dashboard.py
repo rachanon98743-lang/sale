@@ -91,7 +91,7 @@ class Snapshot:
                    "model": co.ai.model, "usage": usage, "limits": limits, "over": over, "calls": co.acct.recent_ai_calls(30)},
             "gemini": {"has_key": bool(co.gemini.key), "enabled": co.gemini.enabled,
                        "enabled_setting": bool(co.gemini.setting("gemini_enabled", True)), "model": co.gemini.model,
-                       "calls": co.gemini.calls_today(), "limit": int(co.gemini.setting("gemini_daily_calls", 200)),
+                       "calls": co.gemini.calls_today(), "limit": int(co.gemini.setting("gemini_daily_calls", 300)),
                        "usage": gb[0], "limits": gb[1], "over": gb[2],
                        "veto": int(co.ai.setting("gemini_veto_conf", 80)), "err": co.gemini.last_err,
                        "setting_model": co.gemini.setting("gemini_model", "gemini-flash-latest")},
@@ -212,7 +212,7 @@ tr.click{cursor:pointer}tr.click:active{background:#21262d}
 <h3 style="margin:12px 0 0">♊ Gemini</h3>
 <div class="form">
 <div><label>เปิดใช้ Gemini</label><select id="f_gen"><option value="1">เปิด</option><option value="0">ปิด</option></select></div>
-<div><label>รุ่น Gemini</label><select id="f_gmodel"><option value="gemini-flash-latest">Flash ล่าสุด (แนะนำ ฟรี)</option><option value="gemini-2.5-flash">2.5 Flash</option><option value="gemini-2.5-flash-lite">2.5 Flash-Lite (ประหยัดสุด)</option><option value="gemini-2.5-pro">2.5 Pro (เก่งสุด โควตาฟรีน้อย)</option></select></div>
+<div><label>รุ่น Gemini</label><select id="f_gmodel"><option value="gemini-flash-latest">Flash ล่าสุด (แนะนำ คุ้มสุด)</option><option value="gemini-2.5-flash">2.5 Flash</option><option value="gemini-2.5-flash-lite">2.5 Flash-Lite (ประหยัดสุด)</option><option value="gemini-2.5-pro">2.5 Pro (เก่งสุด โควตาฟรีน้อย)</option></select></div>
 <div><label>เรียกได้สูงสุด ครั้ง/วัน</label><input id="f_gcalls" type="number" step="10" min="0" max="1500"></div>
 <div><label>token สูงสุดต่อวัน</label><input id="f_gtok" type="number" step="10000" min="0" max="50000000"></div>
 <div><label>token สูงสุดต่อเดือน</label><input id="f_gmtok" type="number" step="100000" min="0" max="500000000"></div>
