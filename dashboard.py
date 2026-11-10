@@ -212,12 +212,12 @@ tr.click{cursor:pointer}tr.click:active{background:#21262d}
 <h3 style="margin:12px 0 0">♊ Gemini</h3>
 <div class="form">
 <div><label>เปิดใช้ Gemini</label><select id="f_gen"><option value="1">เปิด</option><option value="0">ปิด</option></select></div>
-<div><label>รุ่น Gemini</label><select id="f_gmodel"><option value="gemini-flash-latest">Flash ล่าสุด (แนะนำ คุ้มสุด)</option><option value="gemini-2.5-flash">2.5 Flash</option><option value="gemini-2.5-flash-lite">2.5 Flash-Lite (ประหยัดสุด)</option><option value="gemini-2.5-pro">2.5 Pro (เก่งสุด โควตาฟรีน้อย)</option></select></div>
+<div><label>รุ่น Gemini</label><select id="f_gmodel"><option value="gemini-flash-latest">Flash ล่าสุด (แนะนำ คุ้มสุด)</option><option value="gemini-2.5-flash">2.5 Flash</option><option value="gemini-2.5-flash-lite">2.5 Flash-Lite (ประหยัดสุด)</option><option value="gemini-2.5-pro">2.5 Pro (เก่งสุด แพงสุด)</option></select></div>
 <div><label>เรียกได้สูงสุด ครั้ง/วัน</label><input id="f_gcalls" type="number" step="10" min="0" max="1500"></div>
 <div><label>token สูงสุดต่อวัน</label><input id="f_gtok" type="number" step="10000" min="0" max="50000000"></div>
 <div><label>token สูงสุดต่อเดือน</label><input id="f_gmtok" type="number" step="100000" min="0" max="500000000"></div>
 <div><label>token ตอบสูงสุดต่อครั้ง</label><input id="f_gcall" type="number" step="128" min="256" max="8192"></div>
-<div><label>ใช้แบบจ่ายเงิน (มีบัตรผูกใน Google)</label><select id="f_gpaid"><option value="0">ไม่ (ฟรี)</option><option value="1">ใช่ คุมงบด้วย</option></select></div>
+<div><label>ใช้แบบจ่ายเงิน (มีบัตรผูกใน Google)</label><select id="f_gpaid"><option value="1">ใช่ คุมงบด้วย</option><option value="0">ไม่ ใช้โควตาฟรี</option></select></div>
 <div><label>งบต่อวัน (USD, เฉพาะแบบจ่ายเงิน)</label><input id="f_gday" type="number" step="0.01" min="0" max="100"></div>
 <div><label>งบต่อเดือน (USD, เฉพาะแบบจ่ายเงิน)</label><input id="f_gmonth" type="number" step="0.1" min="0" max="1000"></div>
 <div><label>Gemini ค้านได้เมื่อมั่นใจ ≥ (%)</label><input id="f_veto" type="number" step="5" min="50" max="101"></div>
@@ -314,7 +314,7 @@ const GU=G.usage||{},GLm=G.limits||{};
 put('gmBars',G.has_key?bar('เรียก Gemini วันนี้',GU.day_calls,GLm.day_calls,v=>f(v,0)+' ครั้ง')+bar('token วันนี้',GU.day_tokens,GLm.day_tokens,v=>f(v,0))+bar('token เดือนนี้',GU.month_tokens,GLm.month_tokens,v=>f(v,0))+
  (GLm.paid?bar('ค่าใช้จ่ายวันนี้ (ประมาณ)',GU.day_usd,GLm.day_usd,v=>'$'+f(v,4))+bar('ค่าใช้จ่ายเดือนนี้ (ประมาณ)',GU.month_usd,GLm.month_usd,v=>'$'+f(v,4))
   :'<div class="m" style="font-size:12px">แบบฟรี: ไม่เสียเงิน · ถ้าเป็นแบบจ่ายเงินจะประมาณ $'+f(GU.month_usd,4)+' เดือนนี้</div>')+((G.over||[]).length?'<div class="r" style="font-size:12px">🔴 ถึงเพดาน: '+esc(G.over.join(', '))+' (ที่ประชุมใช้ Claude อย่างเดียวจนขึ้นวันใหม่)</div>':''):'');
-put('gmState',!G.has_key?'⚪ ยังไม่ได้ใส่ Gemini API key (ฟรี: aistudio.google.com/apikey แล้วเมนู manage.sh ข้อ 20)':!G.enabled?'⚪ ปิด Gemini อยู่':'🟢 Gemini ทำงานอยู่ · รุ่น '+esc(G.model)+' · วันนี้ '+G.calls+'/'+G.limit+' ครั้ง (ฟรี)'+(G.err?' · ⚠️ '+esc(G.err):''));
+put('gmState',!G.has_key?'⚪ ยังไม่ได้ใส่ Gemini API key (aistudio.google.com/apikey แล้วเมนู manage.sh ข้อ 20)':!G.enabled?'⚪ ปิด Gemini อยู่':'🟢 Gemini ทำงานอยู่ · รุ่น '+esc(G.model)+' · วันนี้ '+G.calls+'/'+G.limit+' ครั้ง'+((G.limits||{}).paid?' · แบบจ่ายเงิน ค่าใช้จ่ายวันนี้ ≈$'+f((G.usage||{}).day_usd,4):' (โควตาฟรี)')+(G.err?' · ⚠️ '+esc(G.err):''));
 put('meet',!M?'<div class="m">ยังไม่มีการประชุม รอรอบที่มีข้อเสนอซื้อ</div>':'<div class="m">ล่าสุด '+esc(M.t.slice(11,16))+' · ตลาด '+esc(M.regime||'')+(M.market?' · '+esc(M.market):'')+'</div>'+Object.entries(M.views||{}).map(([s,v])=>`<div><b>${esc(s)}</b> ${GV[v.view]||esc(v.view)} ${v.confidence}% <span class="m">${esc(v.reason)}</span></div>`).join('')+((M.minutes||[]).length?'<h3 style="margin-top:8px;font-size:14px">ผลตัดสินร่วมกับ Claude</h3>'+M.minutes.map(x=>`<div>${esc(x)}</div>`).join(''):'')+((M.watch||[]).length?'<h3 style="margin-top:8px;font-size:14px">👀 น่าจับตา (ยังไม่ซื้อ)</h3>'+M.watch.map(w=>`<div><b>${esc(w.symbol)}</b> <span class="m">${esc(w.reason)}</span></div>`).join(''):''));
 put('calls',A.calls.map(x=>`<tr><td class="m">${esc(x.t.slice(5,16).replace('T',' '))}</td><td style="text-align:left;white-space:normal"><details data-k="${esc(x.t)}"><summary>${esc(x.purpose)}</summary><pre>${esc(x.result)}</pre></details></td><td>${f(x.tin,0)} / ${f(x.tout,0)}</td><td>${String(x.model||'').startsWith('gemini')?'<span class="m">♊ ≈</span>$'+f(x.usd,5):'$'+f(x.usd,5)}</td></tr>`).join('')||'<tr><td class="m">ยังไม่มี</td></tr>');
 const LN=D.line;put('lineState',LN.enabled?'🟢 ส่งแจ้งเตือนได้':'⚪ ยังไม่ได้เชื่อม LINE: ใส่ token และ user ID ที่เมนู manage.sh ข้อ 11');

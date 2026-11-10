@@ -4,7 +4,7 @@ departments.py — แผนกต่างๆ ของบริษัท AI �
   1. ResearchDept   ฝ่ายวิจัยตลาด     สแกนทุกเหรียญ คำนวณอินดิเคเตอร์ ให้คะแนน + ดูภาวะตลาดรวม (BTC)
   2. StrategyDept   ฝ่ายกลยุทธ์        แปลงผลวิจัยเป็นข้อเสนอเทรด (จุดเข้า / ตัดขาดทุน / ทำกำไร)
   3. AIAnalystDept  ฝ่ายนักวิเคราะห์ AI  ให้ Claude ตรวจข้อเสนอก่อนอนุมัติ (ไม่บังคับ มีเพดานค่าใช้จ่าย)
- 3b. GeminiAnalystDept ฝ่ายวิเคราะห์ Gemini  ความเห็นที่สองจาก Gemini (ฟรี) ส่งเข้าที่ประชุมกับ Claude ก่อนตัดสิน
+ 3b. GeminiAnalystDept ฝ่ายวิเคราะห์ Gemini  ความเห็นที่สองจาก Gemini ส่งเข้าที่ประชุมกับ Claude ก่อนตัดสิน
   4. RiskDept       ฝ่ายบริหารความเสี่ยง  กฎเหล็ก: ขนาดไม้ จำนวนไม้ ขาดทุนสูงสุดต่อวัน ปุ่มหยุดฉุกเฉิน
   5. ExecutionDept  ฝ่ายเทรด            ส่งคำสั่งซื้อขายจริงไป Binance + ตั้ง stop loss บนกระดาน
   6. AccountingDept ฝ่ายบัญชี           บันทึกทุกการเทรดลง SQLite คำนวณกำไรขาดทุน
@@ -696,7 +696,7 @@ class GeminiAnalystDept:
     def enabled(self):
         return bool(self.key) and bool(self.setting("gemini_enabled", True))
 
-    # ราคาโดยประมาณต่อ 1 ล้าน token (input, output) กรณีเปิดจ่ายเงิน (ใช้แบบฟรีอยู่ = ไม่เสียเงินจริง)
+    # ราคาโดยประมาณต่อ 1 ล้าน token (input, output) ใช้ประเมินค่าใช้จ่ายและคุมงบแบบจ่ายเงิน
     PRICES = {"pro": (1.25, 10.0), "lite": (0.10, 0.40), "flash": (0.30, 2.50)}
 
     def price(self, model):
@@ -754,7 +754,7 @@ class GeminiAnalystDept:
             parts = ((data.get("candidates") or [{}])[0].get("content") or {}).get("parts", [])
             text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
             pin, pout = self.price(m)
-            est = tin / 1e6 * pin + tout / 1e6 * pout  # ค่าโดยประมาณ (แบบฟรี = ไม่ได้จ่ายจริง)
+            est = tin / 1e6 * pin + tout / 1e6 * pout  # ค่าใช้จ่ายโดยประมาณจากราคาต่อ token
             self.acct.add_ai_call(purpose, m, tin, tout, est, text[:600])
             return text
         raise RuntimeError("ไม่มีรุ่น Gemini ที่ใช้ได้ (%s): %s" % (", ".join(tried), err))
