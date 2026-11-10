@@ -79,6 +79,8 @@ EOF
 systemctl daemon-reload
 systemctl enable -q $SVC_NAME
 if grep -q '^WEBULL_APP_KEY=' "$ENV"; then systemctl restart $SVC_NAME; else echo "ยังไม่มี key: บอทจะเริ่มหลังใส่ key ที่ manage.sh ข้อ 1"; fi
+# อัปเดตเองจาก GitHub ทุก 5 นาที (ไม่ต้องกดเมนู 7)
+[ -f "$DIR/.no_autoupdate" ] || bash "$DIR/auto_update.sh" install
 
 say "7/7 เปิดพอร์ตแดชบอร์ดให้เฉพาะ Tailscale"
 command -v tailscale >/dev/null || curl -fsSL https://tailscale.com/install.sh | sh >/dev/null

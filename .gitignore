@@ -7,3 +7,6 @@ heartbeat.json
 line_last_webhook.txt
 line_state.json
 venv/
+.no_autoupdate
+auto_update.log
+.bad_version

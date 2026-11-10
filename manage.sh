@@ -21,6 +21,11 @@ json.dump(c,open(p,"w",encoding="utf-8"),ensure_ascii=False,indent=2)
 PY
 }
 
+# เปิดอัปเดตอัตโนมัติให้เอง (ไม่ต้องกด 7) ยกเว้นเจ้าของสั่งปิดไว้ (ข้อ 21)
+if [ -f "$DIR/auto_update.sh" ] && [ ! -f "$DIR/.no_autoupdate" ] && ! systemctl is-enabled -q $SVC_NAME-autoupdate.timer 2>/dev/null; then
+  bash "$DIR/auto_update.sh" install
+fi
+
 while true; do
   echo
   echo "=== AI Stock Company (Webull) | โหมด: $(mode) | สถานะ: $(systemctl is-active $SVC_NAME) ==="
@@ -30,7 +35,7 @@ while true; do
   echo " 4) เปลี่ยนระดับความเสี่ยง: low / mid / high"
   echo " 5) ดู log ล่าสุด"
   echo " 6) รีสตาร์ทบอท"
-  echo " 7) อัปเดตบอทเป็นเวอร์ชันล่าสุด"
+  echo " 7) อัปเดตบอทเป็นเวอร์ชันล่าสุดทันที (ปกติอัปเดตเองทุก 5 นาทีอยู่แล้ว)"
   echo " 8) เปลี่ยนรหัสผ่านแดชบอร์ด"
   echo " 9) ตรวจการเชื่อมต่อ Webull และยอดเงิน (ไม่ซื้อขาย)"
   echo "10) ให้ Webull ตรวจคำสั่งซื้อทดลอง SPY \$5 (preview ไม่ซื้อจริง)"
@@ -38,6 +43,7 @@ while true; do
   echo "12) ส่งข้อความทดสอบเข้า LINE"
   echo "13) ตั้งเพดานทุนเงินจริง (USD)"
   echo "14) ตั้งแจ้งเตือนเมื่อ VPS ดับ (healthchecks.io)"
+  echo "21) อัปเดตอัตโนมัติ: ดูสถานะ / เปิด / ปิด"
   echo " 0) ออก"
   read -r -p "เลือก: " c
   case "$c" in
@@ -73,9 +79,12 @@ while true; do
          *) echo "ไม่ถูกต้อง" ;; esac ;;
     5) journalctl -u $SVC_NAME -n 40 --no-pager ;;
     6) systemctl restart $SVC_NAME; echo "รีสตาร์ทแล้ว" ;;
-    7) git -C "$DIR" stash -q 2>/dev/null; git -C "$DIR" pull -q && git -C "$DIR" stash pop -q 2>/dev/null
-       "$DIR/venv/bin/pip" install -q --upgrade webull-openapi-python-sdk
-       systemctl restart $SVC_NAME; echo "อัปเดตแล้ว" ;;
+    7) echo "กำลังตรวจเวอร์ชันใหม่..."
+       bash "$DIR/auto_update.sh" && echo "เรียบร้อย" || echo "อัปเดตไม่สำเร็จ ย้อนกลับเวอร์ชันเดิมแล้ว"
+       bash "$DIR/auto_update.sh" status ;;
+    21) bash "$DIR/auto_update.sh" status
+       read -r -p "พิมพ์ 1 = เปิด, 2 = ปิด, Enter = ไม่เปลี่ยน: " a
+       case "$a" in 1) bash "$DIR/auto_update.sh" install ;; 2) bash "$DIR/auto_update.sh" remove ;; esac ;;
     8) read -r -p "รหัสใหม่ (อย่างน้อย 10 ตัว): " p
        [ ${#p} -ge 10 ] || { echo "สั้นเกินไป"; continue; }
        setvar DASHBOARD_PASSWORD "$p"; systemctl restart $SVC_NAME; echo "เปลี่ยนแล้ว" ;;
