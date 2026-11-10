@@ -686,19 +686,51 @@ class GeminiAnalystDept:
 
     @property
     def model(self):
-        return self.working or self.setting("gemini_model", "gemini-flash-latest")
+        want = self.setting("gemini_model", "gemini-flash-latest")
+        if self.working and getattr(self, "_want", want) != want:  # เปลี่ยนรุ่นจากแดชบอร์ด: เลิกใช้รุ่นสำรองเดิม
+            self.working = None
+        self._want = want
+        return self.working or want
 
     @property
     def enabled(self):
         return bool(self.key) and bool(self.setting("gemini_enabled", True))
 
+    # ราคาโดยประมาณต่อ 1 ล้าน token (input, output) กรณีเปิดจ่ายเงิน (ใช้แบบฟรีอยู่ = ไม่เสียเงินจริง)
+    PRICES = {"pro": (1.25, 10.0), "lite": (0.10, 0.40), "flash": (0.30, 2.50)}
+
+    def price(self, model):
+        for k in ("pro", "lite", "flash"):
+            if k in model:
+                return self.PRICES[k]
+        return self.PRICES["flash"]
+
     def calls_today(self):
         return self.acct.ai_usage(gemini=True)["day_calls"]
 
+    def budget_status(self):
+        """การใช้ Gemini เทียบเพดาน: ครั้ง/วัน, token/วัน, token/เดือน, ค่าใช้จ่ายประมาณ (ถ้าเปิดจ่ายเงิน)"""
+        u = self.acct.ai_usage(gemini=True)
+        lim = {"day_calls": int(self.setting("gemini_daily_calls", 200)),          # โควตาฟรีราว 250 ครั้ง/วัน
+               "day_tokens": int(self.setting("gemini_daily_token_limit", 1000000)),
+               "month_tokens": int(self.setting("gemini_monthly_token_limit", 20000000)),
+               "day_usd": float(self.setting("gemini_daily_budget_usd", 0.5)),
+               "month_usd": float(self.setting("gemini_monthly_budget_usd", 5)),
+               "max_tokens_per_call": int(self.setting("gemini_max_tokens_per_call", 2048)),
+               "paid": bool(self.setting("gemini_paid", False))}
+        over = []
+        if u["day_calls"] >= lim["day_calls"]: over.append("%d ครั้ง/วัน" % lim["day_calls"])
+        if u["day_tokens"] >= lim["day_tokens"]: over.append("token รายวัน %d" % lim["day_tokens"])
+        if u["month_tokens"] >= lim["month_tokens"]: over.append("token รายเดือน %d" % lim["month_tokens"])
+        if lim["paid"] and u["day_usd"] >= lim["day_usd"]: over.append("งบรายวัน $%.2f" % lim["day_usd"])
+        if lim["paid"] and u["month_usd"] >= lim["month_usd"]: over.append("งบรายเดือน $%.2f" % lim["month_usd"])
+        return u, lim, over
+
     def _call(self, prompt, purpose="", max_tokens=2048):
-        lim = int(self.setting("gemini_daily_calls", 200))  # โควตาฟรีราว 250 ครั้ง/วัน
-        if self.calls_today() >= lim:
-            raise RuntimeError("ครบเพดาน %d ครั้ง/วัน" % lim)
+        _, lim, over = self.budget_status()
+        if over:
+            raise RuntimeError("ถึงเพดาน " + ", ".join(over))
+        max_tokens = min(max_tokens, lim["max_tokens_per_call"])
         body = json.dumps({"contents": [{"role": "user", "parts": [{"text": prompt}]}],
                            "generationConfig": {"temperature": 0.2, "maxOutputTokens": max_tokens,
                                                 "responseMimeType": "application/json"}}).encode()
@@ -721,7 +753,9 @@ class GeminiAnalystDept:
             tout = us.get("candidatesTokenCount", 0) + us.get("thoughtsTokenCount", 0)
             parts = ((data.get("candidates") or [{}])[0].get("content") or {}).get("parts", [])
             text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
-            self.acct.add_ai_call(purpose, m, tin, tout, 0.0, text[:600])  # โควตาฟรี ไม่มีค่าใช้จ่าย
+            pin, pout = self.price(m)
+            est = tin / 1e6 * pin + tout / 1e6 * pout  # ค่าโดยประมาณ (แบบฟรี = ไม่ได้จ่ายจริง)
+            self.acct.add_ai_call(purpose, m, tin, tout, est, text[:600])
             return text
         raise RuntimeError("ไม่มีรุ่น Gemini ที่ใช้ได้ (%s): %s" % (", ".join(tried), err))
 
@@ -1206,7 +1240,7 @@ class AccountingDept:
         r1 = self._one("SELECT COALESCE(SUM(usd),0) u, COALESCE(SUM(tin+tout),0) t, COUNT(*) n FROM ai_calls WHERE t >= ? " + w, (d,))
         r2 = self._one("SELECT COALESCE(SUM(usd),0) u, COALESCE(SUM(tin+tout),0) t FROM ai_calls WHERE t >= ? " + w, (d[:7] + "-01",))
         if gemini:
-            return {"day_usd": 0.0, "day_tokens": r1["t"], "day_calls": r1["n"], "month_usd": 0.0, "month_tokens": r2["t"]}
+            return {"day_usd": r1["u"], "day_tokens": r1["t"], "day_calls": r1["n"], "month_usd": r2["u"], "month_tokens": r2["t"]}
         return {"day_usd": max(r1["u"], self.ai_cost_today()), "day_tokens": r1["t"], "day_calls": r1["n"],
                 "month_usd": r2["u"], "month_tokens": r2["t"]}
 

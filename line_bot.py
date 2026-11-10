@@ -334,7 +334,9 @@ class LineBot:
         lines.append("• " + " · ".join("%s %s" % (n, "✅" if a else "❌") for n, a in alive.items()))
         lines.append("• AI: %s" % ("✅ " + co.ai.model.split("-")[1].title() if co.ai.enabled else "ปิดอยู่"))
         g = co.gemini
-        lines.append("• Gemini: %s" % (("✅ %s · วันนี้ %d ครั้ง" % (g.model, g.calls_today()) + (" ⚠️ " + g.last_err[:60] if g.last_err else ""))
+        gu, gl, _go = g.budget_status() if g.key else ({"day_tokens": 0}, {"day_calls": 0}, [])
+        lines.append("• Gemini: %s" % (("✅ %s · วันนี้ %d/%d ครั้ง · %s token" % (
+            g.model, g.calls_today(), gl["day_calls"], "{:,}".format(gu["day_tokens"])) + (" 🔴 ถึงเพดาน" if _go else "") + (" ⚠️ " + g.last_err[:60] if g.last_err else ""))
                                        if g.enabled else ("ปิดอยู่" if g.key else "ยังไม่ใส่ key (manage.sh ข้อ 20)")))
         lines.append("• แจ้งเตือนเมื่อ VPS ดับ: %s" % ("✅ ตั้งแล้ว" if os.environ.get("HEALTHCHECK_URL") else "ยังไม่ตั้ง (manage.sh ข้อ 18)"))
         if co.downtime_note:

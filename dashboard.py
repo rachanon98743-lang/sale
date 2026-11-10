@@ -72,6 +72,7 @@ class Snapshot:
                 pass
             self.fc_t = time.time()
         usage, limits, over = co.ai.budget_status()
+        gb = co.gemini.budget_status()
         st = co.line._load()
         lb = getattr(co, "line_bot", None)
         research = [{k: r.get(k) for k in ("symbol", "price", "chg24", "rsi", "score", "why", "bt", "setup", "checklist", "warn")}
@@ -91,7 +92,9 @@ class Snapshot:
             "gemini": {"has_key": bool(co.gemini.key), "enabled": co.gemini.enabled,
                        "enabled_setting": bool(co.gemini.setting("gemini_enabled", True)), "model": co.gemini.model,
                        "calls": co.gemini.calls_today(), "limit": int(co.gemini.setting("gemini_daily_calls", 200)),
-                       "veto": int(co.ai.setting("gemini_veto_conf", 80)), "err": co.gemini.last_err},
+                       "usage": gb[0], "limits": gb[1], "over": gb[2],
+                       "veto": int(co.ai.setting("gemini_veto_conf", 80)), "err": co.gemini.last_err,
+                       "setting_model": co.gemini.setting("gemini_model", "gemini-flash-latest")},
             "meeting": co.acct.get("last_meeting"),
             "review": self.review(),
             "activity": co.acct.dept_activity(),
@@ -191,12 +194,13 @@ tr.click{cursor:pointer}tr.click:active{background:#21262d}
 
 <div class="card"><h3>📈 ฝ่ายพัฒนากลยุทธ์ <span class="m" style="font-weight:400;font-size:12px">เรียนรู้จากผลที่ผ่านมา · 30 วัน</span></h3><div id="rv"></div></div>
 
-<div class="card"><h3>🤝 ประชุม AI: Gemini + Claude <span class="m" style="font-weight:400;font-size:12px">ควรเทรดตัวไหน</span></h3><div id="gmState" class="m"></div><div id="meet"></div></div>
+<div class="card"><h3>🤝 ประชุม AI: Gemini + Claude <span class="m" style="font-weight:400;font-size:12px">ควรเทรดตัวไหน</span></h3><div id="gmState" class="m"></div><div id="gmBars" style="margin-top:6px"></div><div id="meet"></div></div>
 
-<div class="card"><h3>🧠 ฝ่ายนักวิเคราะห์ AI · งบและการใช้ token</h3>
+<div class="card"><h3>🧠 AI (Claude + Gemini) · งบและการใช้ token</h3>
 <div id="aiState" class="m"></div>
 <div id="bars"></div>
 <details id="setBox"><summary>⚙️ ตั้งงบ / เพดาน token</summary>
+<h3 style="margin:8px 0 0">🧠 Claude</h3>
 <div class="form">
 <div><label>เปิดใช้ AI</label><select id="f_en"><option value="1">เปิด</option><option value="0">ปิด</option></select></div>
 <div><label>รุ่น AI</label><select id="f_model"><option value="claude-haiku-5-5">Haiku 5.5 (ถูกสุด)</option><option value="claude-sonnet-5-5">Sonnet 5.5</option><option value="claude-opus-5-5">Opus 5.5 (แพงสุด)</option></select></div>
@@ -204,7 +208,18 @@ tr.click{cursor:pointer}tr.click:active{background:#21262d}
 <div><label>งบต่อเดือน (USD)</label><input id="f_month" type="number" step="0.1" min="0" max="1000"></div>
 <div><label>token สูงสุดต่อวัน</label><input id="f_tok" type="number" step="1000" min="0" max="50000000"></div>
 <div><label>token ตอบสูงสุดต่อครั้ง</label><input id="f_call" type="number" step="50" min="100" max="4000"></div>
-<div><label>เปิดใช้ Gemini (ฟรี)</label><select id="f_gen"><option value="1">เปิด</option><option value="0">ปิด</option></select></div>
+</div>
+<h3 style="margin:12px 0 0">♊ Gemini</h3>
+<div class="form">
+<div><label>เปิดใช้ Gemini</label><select id="f_gen"><option value="1">เปิด</option><option value="0">ปิด</option></select></div>
+<div><label>รุ่น Gemini</label><select id="f_gmodel"><option value="gemini-flash-latest">Flash ล่าสุด (แนะนำ ฟรี)</option><option value="gemini-2.5-flash">2.5 Flash</option><option value="gemini-2.5-flash-lite">2.5 Flash-Lite (ประหยัดสุด)</option><option value="gemini-2.5-pro">2.5 Pro (เก่งสุด โควตาฟรีน้อย)</option></select></div>
+<div><label>เรียกได้สูงสุด ครั้ง/วัน</label><input id="f_gcalls" type="number" step="10" min="0" max="1500"></div>
+<div><label>token สูงสุดต่อวัน</label><input id="f_gtok" type="number" step="10000" min="0" max="50000000"></div>
+<div><label>token สูงสุดต่อเดือน</label><input id="f_gmtok" type="number" step="100000" min="0" max="500000000"></div>
+<div><label>token ตอบสูงสุดต่อครั้ง</label><input id="f_gcall" type="number" step="128" min="256" max="8192"></div>
+<div><label>ใช้แบบจ่ายเงิน (มีบัตรผูกใน Google)</label><select id="f_gpaid"><option value="0">ไม่ (ฟรี)</option><option value="1">ใช่ คุมงบด้วย</option></select></div>
+<div><label>งบต่อวัน (USD, เฉพาะแบบจ่ายเงิน)</label><input id="f_gday" type="number" step="0.01" min="0" max="100"></div>
+<div><label>งบต่อเดือน (USD, เฉพาะแบบจ่ายเงิน)</label><input id="f_gmonth" type="number" step="0.1" min="0" max="1000"></div>
 <div><label>Gemini ค้านได้เมื่อมั่นใจ ≥ (%)</label><input id="f_veto" type="number" step="5" min="50" max="101"></div>
 </div>
 <p><button class="pri" id="save">บันทึก</button> <span id="saveMsg" class="m"></span></p>
@@ -283,7 +298,8 @@ $('stopTxt').textContent=D.stopped?'หยุดเปิดไม้ใหม�
 const A=D.ai,u=A.usage,l=A.limits;
 put('aiState',!A.has_key?'⚪ ยังไม่ได้ใส่ Claude API key (เมนู manage.sh ข้อ 2) บอทใช้กฎอย่างเดียว':!A.enabled?'⚪ ปิด AI อยู่':A.over.length?'🔴 ถึงเพดานแล้ว: '+esc(A.over.join(', '))+' (AI หยุดชั่วคราว)':'🟢 ทำงานอยู่ · รุ่น '+esc(A.model)+' · วันนี้เรียก '+u.day_calls+' ครั้ง');
 put('bars',bar('ค่าใช้จ่ายวันนี้',u.day_usd,l.day_usd,v=>'$'+f(v,4))+bar('ค่าใช้จ่ายเดือนนี้',u.month_usd,l.month_usd,v=>'$'+f(v,4))+bar('token วันนี้',u.day_tokens,l.day_tokens,v=>f(v,0)));
-if(!formLoaded){$('f_en').value=A.enabled_setting?'1':'0';$('f_model').value=A.model;$('f_day').value=l.day_usd;$('f_month').value=l.month_usd;$('f_tok').value=l.day_tokens;$('f_call').value=l.max_tokens_per_call;$('f_gen').value=D.gemini.enabled_setting?'1':'0';$('f_veto').value=D.gemini.veto;formLoaded=true;}
+if(!formLoaded){$('f_en').value=A.enabled_setting?'1':'0';$('f_model').value=A.model;$('f_day').value=l.day_usd;$('f_month').value=l.month_usd;$('f_tok').value=l.day_tokens;$('f_call').value=l.max_tokens_per_call;$('f_gen').value=D.gemini.enabled_setting?'1':'0';$('f_veto').value=D.gemini.veto;
+ const GL=D.gemini.limits||{};$('f_gmodel').value=D.gemini.setting_model||'gemini-flash-latest';$('f_gcalls').value=GL.day_calls;$('f_gtok').value=GL.day_tokens;$('f_gmtok').value=GL.month_tokens;$('f_gcall').value=GL.max_tokens_per_call;$('f_gpaid').value=GL.paid?'1':'0';$('f_gday').value=GL.day_usd;$('f_gmonth').value=GL.month_usd;formLoaded=true;}
 const RV=D.review||{};if(RV.trades){const T=RV.trades,Gd=RV.guard||{},pc=v=>(v>0?'+':'')+f(v)+'%';
 put('rv',`<div class="kp" style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:8px">`+
 [['ไม้',T.n],['ชนะ',T.win_pct+'%'],['คาดหวัง/ไม้',pc(T.exp)],['PF',f(T.pf)],['DD สูงสุด',f(T.max_dd)+'%'],['แพ้ติดกัน',T.streak]].map(x=>`<div><div class="m" style="font-size:11px">${x[0]}</div><b>${esc(String(x[1]))}</b></div>`).join('')+`</div>`+
@@ -294,9 +310,13 @@ put('rv',`<div class="kp" style="display:grid;grid-template-columns:repeat(3,1fr
 '<h3 style="margin-top:8px;font-size:14px">พร้อมใช้เงินจริง? '+(RV.ready_all?'✅':'ยังไม่ผ่าน')+'</h3>'+RV.ready.map(r=>`<div>${r[1]?'✅':'❌'} ${esc(r[0])} <span class="m">(${esc(r[2])})</span></div>`).join(''));}
 else put('rv','<div class="m">'+esc(RV.error||'กำลังคำนวณ')+'</div>');
 const G=D.gemini,M=D.meeting,GV={buy:'🟢 ควรซื้อ',wait:'🟡 รอก่อน',avoid:'🔴 ไม่ควรแตะ'};
+const GU=G.usage||{},GLm=G.limits||{};
+put('gmBars',G.has_key?bar('เรียก Gemini วันนี้',GU.day_calls,GLm.day_calls,v=>f(v,0)+' ครั้ง')+bar('token วันนี้',GU.day_tokens,GLm.day_tokens,v=>f(v,0))+bar('token เดือนนี้',GU.month_tokens,GLm.month_tokens,v=>f(v,0))+
+ (GLm.paid?bar('ค่าใช้จ่ายวันนี้ (ประมาณ)',GU.day_usd,GLm.day_usd,v=>'$'+f(v,4))+bar('ค่าใช้จ่ายเดือนนี้ (ประมาณ)',GU.month_usd,GLm.month_usd,v=>'$'+f(v,4))
+  :'<div class="m" style="font-size:12px">แบบฟรี: ไม่เสียเงิน · ถ้าเป็นแบบจ่ายเงินจะประมาณ $'+f(GU.month_usd,4)+' เดือนนี้</div>')+((G.over||[]).length?'<div class="r" style="font-size:12px">🔴 ถึงเพดาน: '+esc(G.over.join(', '))+' (ที่ประชุมใช้ Claude อย่างเดียวจนขึ้นวันใหม่)</div>':''):'');
 put('gmState',!G.has_key?'⚪ ยังไม่ได้ใส่ Gemini API key (ฟรี: aistudio.google.com/apikey แล้วเมนู manage.sh ข้อ 20)':!G.enabled?'⚪ ปิด Gemini อยู่':'🟢 Gemini ทำงานอยู่ · รุ่น '+esc(G.model)+' · วันนี้ '+G.calls+'/'+G.limit+' ครั้ง (ฟรี)'+(G.err?' · ⚠️ '+esc(G.err):''));
 put('meet',!M?'<div class="m">ยังไม่มีการประชุม รอรอบที่มีข้อเสนอซื้อ</div>':'<div class="m">ล่าสุด '+esc(M.t.slice(11,16))+' · ตลาด '+esc(M.regime||'')+(M.market?' · '+esc(M.market):'')+'</div>'+Object.entries(M.views||{}).map(([s,v])=>`<div><b>${esc(s)}</b> ${GV[v.view]||esc(v.view)} ${v.confidence}% <span class="m">${esc(v.reason)}</span></div>`).join('')+((M.minutes||[]).length?'<h3 style="margin-top:8px;font-size:14px">ผลตัดสินร่วมกับ Claude</h3>'+M.minutes.map(x=>`<div>${esc(x)}</div>`).join(''):'')+((M.watch||[]).length?'<h3 style="margin-top:8px;font-size:14px">👀 น่าจับตา (ยังไม่ซื้อ)</h3>'+M.watch.map(w=>`<div><b>${esc(w.symbol)}</b> <span class="m">${esc(w.reason)}</span></div>`).join(''):''));
-put('calls',A.calls.map(x=>`<tr><td class="m">${esc(x.t.slice(5,16).replace('T',' '))}</td><td style="text-align:left;white-space:normal"><details data-k="${esc(x.t)}"><summary>${esc(x.purpose)}</summary><pre>${esc(x.result)}</pre></details></td><td>${f(x.tin,0)} / ${f(x.tout,0)}</td><td>$${f(x.usd,5)}</td></tr>`).join('')||'<tr><td class="m">ยังไม่มี</td></tr>');
+put('calls',A.calls.map(x=>`<tr><td class="m">${esc(x.t.slice(5,16).replace('T',' '))}</td><td style="text-align:left;white-space:normal"><details data-k="${esc(x.t)}"><summary>${esc(x.purpose)}</summary><pre>${esc(x.result)}</pre></details></td><td>${f(x.tin,0)} / ${f(x.tout,0)}</td><td>${String(x.model||'').startsWith('gemini')?'<span class="m">♊ ≈</span>$'+f(x.usd,5):'$'+f(x.usd,5)}</td></tr>`).join('')||'<tr><td class="m">ยังไม่มี</td></tr>');
 const LN=D.line;put('lineState',LN.enabled?'🟢 ส่งแจ้งเตือนได้':'⚪ ยังไม่ได้เชื่อม LINE: ใส่ token และ user ID ที่เมนู manage.sh ข้อ 11');
 put('lineBar',bar('ข้อความเดือนนี้',LN.count,LN.limit,v=>f(v,0)));
 put('lineHealth',(LN.last_webhook?'<div class="m">รับคำสั่งจากแชทล่าสุด: '+esc(LN.last_webhook.slice(5,16).replace('T',' '))+'</div>':'')+(LN.health?LN.health.items.map(i=>`<div class="${i[0]?'g':'r'}">${i[0]?'✅':'❌'} ${esc(i[1])}</div>`).join('')+'<div class="m">ตรวจล่าสุด '+esc(LN.health.t.slice(11,16))+' (ตรวจ/ซ่อมเองทุก 30 นาที)</div>':''));
@@ -317,7 +337,9 @@ async function load(){clearTimeout(timer);try{const res=await fetch('/api/status
  if(!document.hidden)timer=setTimeout(load,5000);}
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)load();});
 $('stop').onclick=async()=>{await fetch('/api/toggle-stop',{method:'POST'});load();};
-$('save').onclick=async()=>{const body={ai_enabled:$('f_en').value==='1',ai_model:$('f_model').value,ai_daily_budget_usd:+$('f_day').value,ai_monthly_budget_usd:+$('f_month').value,ai_daily_token_limit:+$('f_tok').value,ai_max_tokens_per_call:+$('f_call').value,gemini_enabled:$('f_gen').value==='1',gemini_veto_conf:+$('f_veto').value};
+$('save').onclick=async()=>{const body={ai_enabled:$('f_en').value==='1',ai_model:$('f_model').value,ai_daily_budget_usd:+$('f_day').value,ai_monthly_budget_usd:+$('f_month').value,ai_daily_token_limit:+$('f_tok').value,ai_max_tokens_per_call:+$('f_call').value,gemini_enabled:$('f_gen').value==='1',gemini_veto_conf:+$('f_veto').value,
+ gemini_model:$('f_gmodel').value,gemini_daily_calls:+$('f_gcalls').value,gemini_daily_token_limit:+$('f_gtok').value,gemini_monthly_token_limit:+$('f_gmtok').value,
+ gemini_max_tokens_per_call:+$('f_gcall').value,gemini_paid:$('f_gpaid').value==='1',gemini_daily_budget_usd:+$('f_gday').value,gemini_monthly_budget_usd:+$('f_gmonth').value};
  const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const j=await r.json().catch(()=>({}));
  $('saveMsg').textContent=r.ok?'✅ บันทึกแล้ว':'❌ '+(j.error||'บันทึกไม่ได้');formLoaded=false;load();};
 $('ltest').onclick=async()=>{$('lmsg').textContent='กำลังส่ง...';const r=await fetch('/api/line-test',{method:'POST'});const j=await r.json().catch(()=>({}));$('lmsg').textContent=j.msg||'ผิดพลาด';load();};
@@ -331,7 +353,12 @@ SETTINGS = {  # ชื่อ: (ชนิด, ต่ำสุด, สูงสุ
     "ai_daily_budget_usd": (float, 0, 100), "ai_monthly_budget_usd": (float, 0, 1000),
     "ai_daily_token_limit": (int, 0, 50_000_000), "ai_max_tokens_per_call": (int, 100, 4000),
     "gemini_enabled": (bool, None, None), "gemini_veto_conf": (int, 50, 101),
+    "gemini_model": (str, None, None), "gemini_daily_calls": (int, 0, 1500),
+    "gemini_daily_token_limit": (int, 0, 50_000_000), "gemini_monthly_token_limit": (int, 0, 500_000_000),
+    "gemini_max_tokens_per_call": (int, 256, 8192), "gemini_paid": (bool, None, None),
+    "gemini_daily_budget_usd": (float, 0, 100), "gemini_monthly_budget_usd": (float, 0, 1000),
 }
+GEMINI_MODELS = {"gemini-flash-latest", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"}
 MODELS = {"claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"}
 
 
@@ -482,6 +509,8 @@ def serve(company, port, host="127.0.0.1"):
                             raise ValueError("%s ต้องอยู่ระหว่าง %s ถึง %s" % (k, lo, hi))
                         if k == "ai_model" and v not in MODELS:
                             raise ValueError("รุ่นไม่ถูกต้อง")
+                        if k == "gemini_model" and v not in GEMINI_MODELS:
+                            raise ValueError("รุ่น Gemini ไม่ถูกต้อง")
                         clean[k] = v
                 except (ValueError, TypeError) as e:
                     return self._send(400, json.dumps({"error": str(e)}, ensure_ascii=False), "application/json; charset=utf-8")
