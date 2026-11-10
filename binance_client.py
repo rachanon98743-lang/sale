@@ -138,14 +138,16 @@ class Binance:
     def tickers_24h(self):
         if not self.th:
             return self.public("/api/v3/ticker/24hr")
-        out = []  # Binance TH ต้องขอทีละเหรียญ
-        for sym in self.filters:
+        # Binance TH ต้องขอทีละเหรียญ: ขอพร้อมกันหลายเส้น (เดิมทีละตัว ~1-2 นาที → ~10-15 วินาที)
+        from concurrent.futures import ThreadPoolExecutor
+
+        def one(sym):
             try:
-                out.append(self.public("/api/v3/ticker/24hr", {"symbol": sym}))
+                return self.public("/api/v3/ticker/24hr", {"symbol": sym})
             except BinanceError:
-                pass
-            time.sleep(0.05)
-        return out
+                return None
+        with ThreadPoolExecutor(max_workers=int(getattr(self, "workers", 6))) as pool:
+            return [t for t in pool.map(one, list(self.filters)) if t]
 
     def order_book(self, symbol, limit=20):
         """สมุดคำสั่งซื้อขาย: คืน (bids, asks) เป็นลิสต์ [(ราคา, จำนวน)] เรียงจากราคาดีสุด"""

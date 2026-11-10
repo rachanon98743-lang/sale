@@ -154,7 +154,7 @@ def features_of(r, regime):
 
 
 FEATURE_TH = {"rsi": "RSI", "chg24": "ขึ้นใน 24 ชม.", "ext": "ห่าง EMA20", "regime": "ตลาด", "vol": "วอลุ่ม",
-              "setup": "จังหวะ", "htf": "TF ใหญ่"}
+              "setup": "จังหวะ", "htf": "TF ใหญ่", "conv": "ที่ประชุม AI"}
 
 
 # ===================================================================== 1. Research
@@ -237,6 +237,44 @@ class ResearchDept:
         return {"trades": trades, "wins": wins, "losses": losses, "timeouts": timeouts,
                 "p_win": round(p_win, 3), "ev": round(ev, 4)}
 
+    def analyze_many(self, cands, risk, btc_k):
+        """ดึงกราฟ + วิเคราะห์หลายเหรียญพร้อมกัน (cands = [(vol_m, symbol, chg24)])"""
+        from concurrent.futures import ThreadPoolExecutor
+        cfg = RISK_PROFILES[risk]
+
+        def one(c):
+            vol_m, s, chg = c
+            try:
+                k = self.ex.klines(s, cfg["tf"], 250)
+                if len(k) < 60:
+                    return None
+                try:
+                    htf_k = self.ex.klines(s, HTF.get(cfg["tf"], "1d"), 120)
+                except Exception:
+                    htf_k = None
+                a = self.analyze(k, risk, htf_k, btc_k)
+                a.update(symbol=s, vol_m=vol_m, chg24=chg)
+                return a
+            except Exception as e:
+                self.log(self.name, "ข้าม %s: %s" % (s, e))
+                return None
+        with ThreadPoolExecutor(max_workers=int(self.cfg.get("scan_workers", 6))) as pool:
+            return [r for r in pool.map(one, cands) if r]
+
+    def rescan(self, symbols, risk):
+        """ช่องทางด่วน: วิเคราะห์ใหม่เฉพาะเหรียญที่น่าจับตา (ไม่ต้องรอรอบสแกนเต็ม)"""
+        cfg = RISK_PROFILES[risk]
+        btc_k = None
+        try:
+            btc_k = self.ex.klines("BTC" + self.ex.quote, cfg["tf"], 250)
+        except Exception:
+            pass
+        cands = []
+        for s in symbols:
+            t = self.tickers.get(s) or {}
+            cands.append((float(t.get("quoteVolume") or 0) / 1e6, s, float(t.get("priceChangePercent") or 0)))
+        return self.analyze_many(cands, risk, btc_k)
+
     def scan(self, risk):
         cfg = RISK_PROFILES[risk]
         tick = self.ex.tickers_24h()
@@ -289,21 +327,7 @@ class ResearchDept:
             btc_k = self.ex.klines("BTC" + self.ex.quote, cfg["tf"], 250)
         except Exception:
             pass
-        for vol_m, s, chg in cands:
-            try:
-                k = self.ex.klines(s, cfg["tf"], 250)
-                if len(k) < 60:
-                    continue
-                try:
-                    htf_k = self.ex.klines(s, HTF.get(cfg["tf"], "1d"), 120)
-                except Exception:
-                    htf_k = None
-                a = self.analyze(k, risk, htf_k, btc_k)
-                a.update(symbol=s, vol_m=vol_m, chg24=chg)
-                results.append(a)
-            except Exception as e:
-                self.log(self.name, "ข้าม %s: %s" % (s, e))
-            time.sleep(0.1)
+        results = self.analyze_many(cands, risk, btc_k)
         results.sort(key=lambda x: -x["score"])
         good = [r for r in results if r["score"] >= cfg["min_score"]]
         self.log(self.name, "สแกน %d เหรียญ ผ่านเช็กลิสต์ %d: %s" % (
@@ -557,7 +581,9 @@ class AIAnalystDept:
             "support/resistance = แนวรับ/ต้านใกล้สุด, why = เช็กลิสต์ที่ผ่าน, warn = จุดอันตราย, "
             "bt = ผลทดสอบย้อนหลังสัญญาณเดียวกันบนเหรียญนี้: p_win โอกาสชนะ, ev กำไรคาดหวังต่อไม้):\n%s%s\n\n"
             "ตัดสินทีละตัว เหตุผลภาษาไทยสั้นๆ อ่านง่าย (ไม่เกิน 25 คำ) อ้างตัวเลขที่ใช้ตัดสิน\n"
-            "ตอบเป็น JSON อย่างเดียว รูปแบบ: {\"decisions\":[{\"symbol\":\"XXXUSDT\",\"approve\":true,\"reason\":\"...\"}]}"
+            "confidence = ความมั่นใจว่าไม้นี้จะถึงเป้าก่อนโดนตัด 0-100 (ประเมินตามจริง ไม่ต้องเกรงใจ: 50 = เหรียญออกหัวก้อย) "
+            "ระบบจะใช้ค่านี้รวมกับความมั่นใจของ Gemini กำหนดขนาดไม้: มั่นใจมาก = ไม้ใหญ่ มั่นใจน้อย = ไม้เล็กหรือไม่ซื้อ\n"
+            "ตอบเป็น JSON อย่างเดียว รูปแบบ: {\"decisions\":[{\"symbol\":\"XXXUSDT\",\"approve\":true,\"confidence\":70,\"reason\":\"...\"}]}"
         ) % (self.PLAYBOOK, regime, json.dumps(track or {}, ensure_ascii=False), json.dumps(brief, ensure_ascii=False), meeting)
         try:
             text = self._call(prompt, purpose="ประชุมตรวจข้อเสนอซื้อ %d ตัว%s" % (len(brief), " (มีความเห็น Gemini)" if views else ""))
@@ -569,6 +595,7 @@ class AIAnalystDept:
             self.log(self.name, "เรียก Claude ไม่สำเร็จ (%s) อนุมัติตามกฎอย่างเดียว" % e)
             return proposals
         veto = int(self.setting("gemini_veto_conf", 80))
+        min_conv = float(self.setting("min_conviction", 55))
         approved, minutes = [], []
         for p in proposals:
             s = p["symbol"]
@@ -578,10 +605,22 @@ class AIAnalystDept:
             vetoed = ok and g and g["view"] == "avoid" and g["confidence"] >= veto
             if vetoed:
                 ok, reason = False, "Gemini ค้าน (มั่นใจ %d%%): %s · Claude เคยให้ผ่าน: %s" % (g["confidence"], g["reason"], reason)
+            # ความมั่นใจรวมของที่ประชุม: เห็นตรงกัน = ไม้เต็ม, เห็นต่าง = ไม้เล็กลง, รวมแล้วต่ำ = ไม่ซื้อ
+            conv = self.conviction(d, g)
+            if ok and conv < min_conv:
+                ok, low_conv = False, True
+                reason = "ที่ประชุมมั่นใจรวมแค่ %.0f%% (ต้อง ≥%.0f%%) · Claude: %s%s" % (
+                    conv, min_conv, reason, (" · Gemini %s: %s" % (self.GEMINI_TH[g["view"]], g["reason"])) if g else "")
+            else:
+                low_conv = False
+            if ok:
+                p["conviction"] = round(conv)
+                p["size_mult"] = round(0.4 + 0.6 * max(0.0, min(1.0, (conv - min_conv) / max(1.0, 90 - min_conv))), 2)
             if g:
-                minutes.append("%s · Gemini %s %d%% · Claude %s → %s" % (
+                minutes.append("%s · Gemini %s %d%% · Claude %s %s%% · รวม %.0f%% → %s" % (
                     s, self.GEMINI_TH[g["view"]], g["confidence"], "ผ่าน" if (d is None or d.get("approve")) else "ไม่ผ่าน",
-                    "✅ ซื้อ" if ok else "❌ ไม่ซื้อ"))
+                    (d or {}).get("confidence", "-"), conv,
+                    ("✅ ซื้อ ไม้ x%.2g" % p["size_mult"]) if ok else "❌ ไม่ซื้อ"))
             if ok:
                 p["ai_reason"] = reason
                 if g:
@@ -591,7 +630,7 @@ class AIAnalystDept:
                 if reason:
                     self.log(self.name, "อนุมัติ %s: %s" % (s, reason))
             else:
-                self.rejected_by[s] = "gemini" if vetoed else "claude"
+                self.rejected_by[s] = "gemini" if vetoed or (low_conv and g and g["view"] != "buy") else "claude"
                 self.log(self.name, "ปฏิเสธ %s: %s" % (s, reason))
                 self.acct.add_decision(self.GEMINI_DEPT if vetoed else self.name, s, False, reason or "ไม่ระบุเหตุผล")
         if minutes:
@@ -599,6 +638,23 @@ class AIAnalystDept:
             self.last_meeting = minutes
         self.log(self.name, "อนุมัติ %d/%d (ค่า AI วันนี้ $%.4f)" % (len(approved), len(proposals), self.acct.ai_cost_today()))
         return approved
+
+    @staticmethod
+    def conviction(d, g):
+        """ความมั่นใจรวม 0-100 จาก Claude (d) และ Gemini (g)"""
+        try:
+            c = float((d or {}).get("confidence", 65))
+        except (TypeError, ValueError):
+            c = 65.0
+        if not (d is None or d.get("approve")):
+            c = min(c, 40.0)
+        if not g:
+            return c
+        if g["view"] == "buy":
+            return (c + g["confidence"]) / 2
+        if g["view"] == "wait":
+            return c - 10 - g["confidence"] * 0.1
+        return c - 20 - g["confidence"] * 0.15  # avoid แต่ยังไม่ถึงเกณฑ์ค้านเด็ดขาด
 
     def daily_letter(self, summary):
         if not self.enabled or self.budget_status()[2]:
@@ -733,6 +789,9 @@ class RiskDept:
         self.max_capital = float("inf") if cfg.get("mode") == "paper" else float(cfg.get("max_capital_usdt", 100))
         self.reserve = float(cfg.get("cash_reserve_pct", 10)) / 100
         self.halted = False
+        # ความเสี่ยงรวมพอร์ตสูงสุด (% ถ้าทุกไม้โดนตัดพร้อมกัน) และจำนวนไม้ใหม่สูงสุดต่อรอบ ตามระดับความเสี่ยง
+        self.cfg_heat = dict({"low": 2, "mid": 4, "high": 6}, **(cfg.get("max_portfolio_heat_pct") or {}))
+        self.cfg_max_new = dict({"low": 1, "mid": 2, "high": 3}, **(cfg.get("max_new_per_round") or {}))
 
     def kill_switch_file(self):
         return os.path.exists("STOP")  # สร้างไฟล์ชื่อ STOP ในโฟลเดอร์ = หยุดเปิดไม้ใหม่ทันที
@@ -820,14 +879,30 @@ class RiskDept:
         size_mult *= guard["size"]
         capital = min(equity_now, self.max_capital)  # ใช้เงินไม่เกินเพดานที่ตั้งไว้
         used = sum(p["cost"] for p in open_pos)
-        orders, full, poor = [], [], []
+        orders, full, poor, hot, many = [], [], [], [], []
         self.last_full = set()
+        heat_max = float(self.cfg_heat.get(risk, 4)) / 100
+        heat = sum(max(0.0, p["qty"] * (p["entry"] - p["sl"])) for p in open_pos)  # stop ที่เลื่อนมาเหนือทุนแล้ว = ไม่มีความเสี่ยง
+        max_new = int(self.cfg_max_new.get(risk, 2))
+        new_cnt = 0
         for p in proposals:
             if slots <= 0:
                 full.append(p["symbol"])
                 continue
             # ขนาดไม้ตามความเสี่ยง: ถ้าโดนตัดจะเสียไม่เกิน risk% ของพอร์ต (stop กว้าง = ไม้เล็กลง)
             amt = capital * min(cfg["size"], cfg.get("risk", 1) / max(p.get("sl_pct") or cfg["sl"], 1e-4)) * size_mult
+            amt *= float(p.get("size_mult", 1.0))  # ขนาดตามความมั่นใจของที่ประชุม AI
+            # ความเสี่ยงรวมทั้งพอร์ต (portfolio heat): ถ้าทุกไม้โดนตัดพร้อมกัน ต้องเสียไม่เกิน heat% ของพอร์ต
+            # เหรียญคริปโตมักร่วงพร้อมกันตาม BTC จึงคุมรวม ไม่ใช่แค่ทีละไม้
+            heat_room = capital * heat_max - heat
+            sl_pct = max(p.get("sl_pct") or cfg["sl"], 1e-4)
+            if heat_room <= 0:
+                hot.append(p["symbol"])
+                continue
+            amt = min(amt, heat_room / sl_pct)
+            if new_cnt >= max_new:
+                many.append(p["symbol"])
+                continue
             room = capital * (1 - self.reserve) - used
             amt = min(amt, room, usdt_free * 0.99)
             if amt < filters[p["symbol"]]["min_notional"] * 1.2:
@@ -837,6 +912,8 @@ class RiskDept:
             used += amt
             usdt_free -= amt
             slots -= 1
+            heat += amt * sl_pct
+            new_cnt += 1
         if full:  # รวมเป็นบรรทัดเดียว ไม่ให้ log/LINE รก
             self.deny(full, ("ถือครบ %d ไม้แล้ว (เพดานความเสี่ยง%s%s) รอให้มีไม้ปิดก่อน" % (
                 max(1, cfg["max_pos"] - guard["pos_cut"]), cfg["name"], (" · " + guard["name"]) if guard["pos_cut"] else ""))
@@ -844,6 +921,11 @@ class RiskDept:
         self.last_full = set(full)
         if poor:
             self.deny(poor, "เงินที่เหลือไม่ถึงขั้นต่ำต่อไม้ (เก็บเงินสำรองไว้ %.0f%% ไม่ใช้)" % (self.reserve * 100))
+        if hot:
+            self.deny(hot, "ความเสี่ยงรวมพอร์ตเต็มแล้ว: ถ้าทุกไม้โดนตัดพร้อมกันจะเสีย %.1f%% ของพอร์ต (เพดาน %.0f%%) รอไม้เดิมล็อกกำไร/ปิดก่อน" % (
+                heat / capital * 100 if capital else 0, heat_max * 100))
+        if many:
+            self.deny(many, "เปิดไม้ใหม่ครบ %d ไม้ในรอบนี้แล้ว (ไม่ทุ่มพร้อมกัน เหรียญมักร่วงตามกัน) รอรอบถัดไป" % max_new)
         if orders:
             self.log(self.name, "อนุมัติ %d คำสั่ง (ตลาด %s, ใช้ทุนสูงสุด %.0f): %s" % (
                 len(orders), regime, capital, ", ".join("%s %.2f" % (o["symbol"], o["usdt"]) for o in orders)))
@@ -912,7 +994,10 @@ class ExecutionDept:
         except Exception as e:
             self.log(self.name, "ตั้ง OCO บนกระดานไม่สำเร็จ (%s) จะเฝ้าราคาเองแทน" % e)
         bt = o.get("bt") or {}
-        meta = {"features": o.get("features") or {}, "p_win": bt.get("p_win"), "ev": bt.get("ev"),
+        feats = dict(o.get("features") or {})
+        if o.get("conviction") is not None:  # เก็บไว้ดูทีหลังว่าไม้ที่ที่ประชุมมั่นใจสูงชนะบ่อยกว่าจริงไหม
+            feats["conv"] = "มั่นใจสูง" if o["conviction"] >= 75 else "มั่นใจกลาง" if o["conviction"] >= 62 else "มั่นใจต่ำ"
+        meta = {"features": feats, "conviction": o.get("conviction"), "size_mult": o.get("size_mult"), "p_win": bt.get("p_win"), "ev": bt.get("ev"),
                 "sl_pct": o["sl_pct"], "peak": px,
                 "bt_trades": bt.get("trades"), "ai_reason": o.get("ai_reason", ""), "score": o.get("score"),
                 "gemini": o.get("gemini", "")}
@@ -923,6 +1008,8 @@ class ExecutionDept:
                 bt["p_win"] * 100, spent * o["tp_pct"], spent * o["sl_pct"], spent * bt.get("ev", 0), bt.get("ev", 0) * 100)
         why = ("\n🎯 จังหวะ: %s · ผ่านเช็กลิสต์ %s · คะแนน %s" % (o["setup"], o.get("checks", "-"), o.get("score"))) if o.get("setup") else ""
         why += ("\n🧠 AI: " + o["ai_reason"]) if o.get("ai_reason") else ""
+        if o.get("conviction") is not None:
+            why += "\n🤝 ที่ประชุมมั่นใจรวม %d%% → ขนาดไม้ %d%% ของปกติ" % (o["conviction"], round(o.get("size_mult", 1) * 100))
         why += ("\n♊ Gemini: " + o["gemini"]) if o.get("gemini") else ""
         self.log(self.name, "🟢 ซื้อ %s %.6g @ %.6g ใช้ %.2f | SL %.6g TP %.6g %s%s%s" % (
             s, qty, px, spent, sl, tp, "(OCO บนกระดาน)" if oco else "(เฝ้าเอง)", fc, why), line=True)

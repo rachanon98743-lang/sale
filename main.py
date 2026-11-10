@@ -71,6 +71,7 @@ class Company:
         self.line = LineNotifier(cfg)
         self.last_ok = time.time()
         self.cycle_started = None
+        self.last_watch = 0
         self.sell_queue = []  # คำสั่งขายจาก LINE รอทำในลูปหลัก
         self.started_at = time.time()
         self.last_eq = None       # มูลค่าพอร์ตล่าสุด (แดชบอร์ด/LINE อ่านค่านี้ ไม่ต้องยิงถาม Binance ทุกครั้ง)
@@ -204,26 +205,70 @@ class Company:
         except Exception as e:
             self.log("ฝ่ายพัฒนากลยุทธ์", "ติดตามผลไม่สำเร็จ: %s" % e)
         cfg = RISK_PROFILES[self.risk]
-        if time.time() - self.last_scan < cfg["every_min"] * 60:
+        full = time.time() - self.last_scan >= cfg["every_min"] * 60
+        fast = (not full and self.last_research and
+                time.time() - self.last_watch >= float(self.cfg.get("watch_every_min", 5)) * 60)
+        if not full and not fast:
             self.save_paper()
             return
-        self.last_scan = time.time()
+        if full:
+            self.last_scan = time.time()
+        self.last_watch = time.time()
         day0 = self.day_start_equity(eq)
         if not self.riskd.can_trade(eq, day0):
-            self.log("CEO", "สั่งงานรอบนี้: งดเปิดไม้ใหม่ (หยุดไว้/ขาดทุนถึงเพดาน) เฝ้าไม้ที่ถือ %d ไม้ต่อ" % len(self.acct.open_positions()))
+            if full:
+                self.log("CEO", "สั่งงานรอบนี้: งดเปิดไม้ใหม่ (หยุดไว้/ขาดทุนถึงเพดาน) เฝ้าไม้ที่ถือ %d ไม้ต่อ" % len(self.acct.open_positions()))
             return
         guard = self.riskd.guard(eq, day0)
         if guard["level"] >= 3:
-            self.log("CEO", "สั่งงานรอบนี้: %s (%s) เฝ้าไม้ที่ถือ %d ไม้ต่อ" % (
-                guard["name"], ", ".join(guard["why"]), len(self.acct.open_positions())))
+            if full:
+                self.log("CEO", "สั่งงานรอบนี้: %s (%s) เฝ้าไม้ที่ถือ %d ไม้ต่อ" % (
+                    guard["name"], ", ".join(guard["why"]), len(self.acct.open_positions())))
             return
-        self.regime = self.research.market_regime()
+        if full:
+            self.regime = self.research.market_regime()
         if self.regime == "bear" and self.cfg.get("skip_bear_market", True) and self.risk != "high":
-            self.log("CEO", "สั่งงานรอบนี้: ตลาดขาลง งดเปิดไม้ใหม่ (ตั้ง skip_bear_market=false เพื่อปิด)")
+            if full:
+                self.log("CEO", "สั่งงานรอบนี้: ตลาดขาลง งดเปิดไม้ใหม่ (ตั้ง skip_bear_market=false เพื่อปิด)")
             return
         held = {p["symbol"] for p in self.acct.open_positions()}
-        self.last_research = self.research.scan(self.risk)
-        props = self.strategy.proposals(self.last_research, self.risk, held, self.regime, extra_score=guard["score_add"])
+        if full:
+            self.last_research = self.research.scan(self.risk)
+            self.trade_round(self.last_research, guard, eq, held, "สั่งงานรอบนี้")
+        else:
+            self.fast_lane(cfg, guard, eq, held)
+        self.save_paper()
+        self.daily_report()
+
+    def fast_lane(self, cfg, guard, eq, held):
+        """ช่องทางด่วนระหว่างรอบสแกนเต็ม: เช็กเหรียญที่เกือบผ่านเกณฑ์ + ที่ Gemini บอกน่าจับตาทุก ~5 นาที
+        ถ้าเพิ่งเข้าเงื่อนไข ส่งเข้าที่ประชุมทันที ไม่ต้องรอ 15 นาที (ไม่พลาดจังหวะ)"""
+        if self.riskd.slots_left(self.risk, self.regime, len(held), guard) <= 0:
+            return
+        gw = [w["symbol"] for w in ((self.acct.get("last_meeting") or {}).get("watch") or []) if w.get("symbol")]
+        near = [r["symbol"] for r in self.last_research if cfg["min_score"] - 10 <= r["score"] < cfg["min_score"]]
+        watch = [s for s in dict.fromkeys(gw + near) if s not in held and s in self.ex.filters][:int(self.cfg.get("watch_max", 10))]
+        if not watch:
+            return
+        old = {r["symbol"]: r for r in self.last_research}
+        new = self.research.rescan(watch, self.risk)
+        fresh = []
+        for r in new:
+            o = old.get(r["symbol"])
+            if o:
+                r.update(vol_m=o.get("vol_m", r.get("vol_m")), chg24=o.get("chg24", r.get("chg24")))
+            if r["score"] >= cfg["min_score"] and (not o or o["score"] < cfg["min_score"] or r["symbol"] in gw):
+                fresh.append(r)
+            old[r["symbol"]] = r
+        self.last_research = sorted(old.values(), key=lambda x: -x["score"])
+        if fresh:
+            self.log("ฝ่ายวิจัยตลาด", "ช่องทางด่วน: เช็ก %d เหรียญน่าจับตา เข้าเงื่อนไขใหม่ %d: %s" % (
+                len(watch), len(fresh), ", ".join("%s(%d %s)" % (r["symbol"], r["score"], r["setup"]) for r in fresh)))
+            self.trade_round(fresh, guard, eq, held, "ช่องทางด่วน")
+
+    def trade_round(self, research, guard, eq, held, label):
+        """กลยุทธ์ → Gemini วิเคราะห์ → ประชุมกับ Claude → ความเสี่ยง → สภาพคล่อง → ส่งคำสั่ง"""
+        props = self.strategy.proposals(research, self.risk, held, self.regime, extra_score=guard["score_add"])
         all_props = list(props)
         self.ai.rejected_by = {}
         n_prop = len(props)
@@ -234,8 +279,9 @@ class Company:
             g = self.gemini.analyze(props, self.regime, track, self.last_research)  # Gemini วิเคราะห์ก่อน
             props = self.ai.review(props, self.regime, track, gemini=g)          # แล้วประชุมกับ Claude
             if g:
+                prev_watch = (self.acct.get("last_meeting") or {}).get("watch", [])
                 self.acct.set("last_meeting", {"t": now_th().isoformat(timespec="seconds"), "regime": self.regime,
-                                               "market": g.get("market", ""), "watch": g.get("watch", []),
+                                               "market": g.get("market", ""), "watch": g.get("watch") or prev_watch,
                                                "views": g.get("views", {}), "minutes": getattr(self.ai, "last_meeting", None) or [],
                                                "bought_candidates": [p["symbol"] for p in props]})
         # ถือเต็มแล้ว: ไม่ต้องเสียค่า AI ตรวจ ให้ฝ่ายบริหารความเสี่ยงแจ้งเหตุผลเลย
@@ -262,13 +308,13 @@ class Company:
                 self.acct.add_decision("ฝ่ายเทรด", o["symbol"], False, "ส่งคำสั่งซื้อไม่สำเร็จ: %s" % e)
         self.learning.record_round(getattr(self.strategy, "rejected", []), all_props, self.ai.rejected_by, orders,
                                    set(bought), liq_fail, getattr(self.riskd, "last_full", set()))
+        if label == "ช่องทางด่วน" and not n_prop:
+            return
         # CEO สรุปงานทุกรอบ: เห็นว่าบอททำงานอยู่ แม้ไม่มีใครเปิดแดชบอร์ด
-        self.log("CEO", "สั่งงานรอบนี้: วิจัย %d เหรียญ → กลยุทธ์เสนอ %d → ผ่านประชุม AI %d → ซื้อ %d%s · ถือ %d/%d ไม้ · ตลาด %s%s" % (
-            len(self.last_research), n_prop, n_ok, len(bought), (" (%s)" % ", ".join(bought)) if bought else "",
+        self.log("CEO", "%s: วิจัย %d เหรียญ → กลยุทธ์เสนอ %d → ผ่านประชุม AI %d → ซื้อ %d%s · ถือ %d/%d ไม้ · ตลาด %s%s" % (
+            label, len(research), n_prop, n_ok, len(bought), (" (%s)" % ", ".join(bought)) if bought else "",
             len(self.acct.open_positions()), RISK_PROFILES[self.risk]["max_pos"], self.regime,
             "" if guard["level"] == 0 and guard["size"] >= 1 else " · " + guard["name"] + (" ไม้ x%.2g" % guard["size"])))
-        self.save_paper()
-        self.daily_report()
 
     def daily_report(self):
         today = now_th().date().isoformat()
