@@ -57,6 +57,8 @@ EOF
 systemctl daemon-reload
 systemctl enable -q tradingbot
 systemctl restart tradingbot
+# อัปเดตเองจาก GitHub ทุก 5 นาที (ไม่ต้องกดเมนู 7)
+[ -f "$DIR/.no_autoupdate" ] || bash "$DIR/auto_update.sh" install
 
 say "5/6 ติดตั้ง Tailscale (เครือข่ายส่วนตัวสำหรับเข้าแดชบอร์ดจากมือถือ)"
 mkdir -p /etc/apt/sources.list.d /usr/share/keyrings

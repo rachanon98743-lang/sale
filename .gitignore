@@ -4,3 +4,6 @@ __pycache__/
 line_state.json
 heartbeat.json
 line_last_webhook.txt
+.no_autoupdate
+auto_update.log
+.bad_version

@@ -13,6 +13,11 @@ setvar(){ # setvar KEY VALUE
 mode(){ grep -o -- '--mode [a-z]*' "$SVC" | awk '{print $2}'; }
 exch(){ python3 -c "import json;print(json.load(open('$DIR/config.json',encoding='utf-8')).get('exchange','binance'))"; }
 
+# เปิดอัปเดตอัตโนมัติให้เอง (ไม่ต้องกด 7) ยกเว้นเจ้าของสั่งปิดไว้ (ข้อ 21)
+if [ -f "$DIR/auto_update.sh" ] && [ ! -f "$DIR/.no_autoupdate" ] && ! systemctl is-enabled -q tradingbot-autoupdate.timer 2>/dev/null; then
+  bash "$DIR/auto_update.sh" install
+fi
+
 while true; do
   echo
   echo "=== AI Trading Company | กระดาน: $(exch) | โหมด: $(mode) | สถานะ: $(systemctl is-active tradingbot) ==="
@@ -22,7 +27,7 @@ while true; do
   echo " 4) เปลี่ยนระดับความเสี่ยง: low / mid / high"
   echo " 5) ดู log ล่าสุด"
   echo " 6) รีสตาร์ทบอท"
-  echo " 7) อัปเดตบอทเป็นเวอร์ชันล่าสุด"
+  echo " 7) อัปเดตบอทเป็นเวอร์ชันล่าสุดทันที (ปกติอัปเดตเองทุก 5 นาทีอยู่แล้ว)"
   echo " 8) เปลี่ยนรหัสผ่านแดชบอร์ด"
   echo " 9) เลือกกระดาน: binance_th (บัญชีไทย) / binance (binance.com)"
   echo "10) ตรวจการเชื่อมต่อกระดานและยอดเงิน (ไม่ซื้อขาย)"
@@ -36,6 +41,7 @@ while true; do
   echo "18) ตั้งแจ้งเตือนเมื่อ VPS ดับทั้งเครื่อง (healthchecks.io)"
   echo "19) เริ่มพอร์ตเงินจำลองใหม่ (ล้างไม้/ประวัติ เริ่มนับใหม่)"
   echo "20) ใส่ Gemini API key (จาก aistudio.google.com/apikey)"
+  echo "21) อัปเดตอัตโนมัติ: ดูสถานะ / เปิด / ปิด"
   echo " 0) ออก"
   read -r -p "เลือก: " c
   case "$c" in
@@ -84,8 +90,12 @@ PY
        *) echo "ไม่ถูกต้อง" ;; esac ;;
     5) journalctl -u tradingbot -n 40 --no-pager ;;
     6) systemctl restart tradingbot; echo "รีสตาร์ทแล้ว" ;;
-    7) git -C "$DIR" stash -q 2>/dev/null; git -C "$DIR" pull -q && git -C "$DIR" stash pop -q 2>/dev/null
-       systemctl restart tradingbot; echo "อัปเดตแล้ว" ;;
+    7) echo "กำลังตรวจเวอร์ชันใหม่..."
+       bash "$DIR/auto_update.sh" && echo "เรียบร้อย" || echo "อัปเดตไม่สำเร็จ ย้อนกลับเวอร์ชันเดิมแล้ว"
+       bash "$DIR/auto_update.sh" status ;;
+    21) bash "$DIR/auto_update.sh" status
+       read -r -p "พิมพ์ 1 = เปิด, 2 = ปิด, Enter = ไม่เปลี่ยน: " a
+       case "$a" in 1) bash "$DIR/auto_update.sh" install ;; 2) bash "$DIR/auto_update.sh" remove ;; esac ;;
     8) read -r -p "รหัสใหม่ (อย่างน้อย 10 ตัว): " p
        [ ${#p} -ge 10 ] || { echo "สั้นเกินไป"; continue; }
        setvar DASHBOARD_PASSWORD "$p"; systemctl restart tradingbot; echo "เปลี่ยนแล้ว" ;;
