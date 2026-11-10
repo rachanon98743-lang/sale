@@ -319,10 +319,11 @@ class LineBot:
                 return "%d ชม. %d นาที" % (sec // 3600, sec % 3600 // 60)
             return "%d วัน %d ชม." % (sec // 86400, sec % 86400 // 3600)
         loop_age = time.time() - co.last_ok
-        ok = loop_age < 300
+        busy = (time.time() - co.cycle_started) if getattr(co, "cycle_started", None) else 0
+        ok = loop_age < 300 or 0 < busy < 900  # กำลังทำรอบยาว (สแกนหลายเหรียญ/ประชุม AI) ไม่ใช่ค้าง
         lines = ["%s ระบบ%s · เปิดต่อเนื่อง %s" % ("🟢" if ok else "🔴", "ออนไลน์" if ok else "ค้าง/มีปัญหา",
                                                 dur(time.time() - co.started_at))]
-        lines.append("• ลูปหลัก: ทำงานล่าสุด %sที่แล้ว" % dur(loop_age))
+        lines.append("• ลูปหลัก: %s" % (("กำลังสแกน/ประชุม AI มา %s" % dur(busy)) if busy > 60 else "ทำงานล่าสุด %sที่แล้ว" % dur(loop_age)))
         if co.last_scan:
             nxt = co.last_scan + RP[co.risk]["every_min"] * 60
             lines.append("• สแกนตลาดล่าสุด %s · รอบถัดไป ~%s" % (

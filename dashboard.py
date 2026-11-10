@@ -84,7 +84,8 @@ class Snapshot:
             "summary": co.acct.summary(), "positions": co.acct.open_positions(), "closed": co.acct.closed_positions(50),
             "research": research, "logs": co.acct.recent_logs(80), "decisions": co.acct.recent_decisions(30, only_rejected=True),
             "stopped": os.path.exists("STOP"), "forecast": self.fc,
-            "health": {"loop_age": time.time() - co.last_ok, "uptime": _dur(time.time() - co.started_at), "down": co.downtime_note},
+            "health": {"loop_age": time.time() - co.last_ok,
+                       "busy": (time.time() - co.cycle_started) if getattr(co, "cycle_started", None) else 0, "uptime": _dur(time.time() - co.started_at), "down": co.downtime_note},
             "ai": {"has_key": bool(co.ai.key), "enabled": co.ai.enabled, "enabled_setting": bool(co.ai.setting("ai_enabled", True)),
                    "model": co.ai.model, "usage": usage, "limits": limits, "over": over, "calls": co.acct.recent_ai_calls(30)},
             "gemini": {"has_key": bool(co.gemini.key), "enabled": co.gemini.enabled,
@@ -114,7 +115,7 @@ class Snapshot:
 
     def refresh(self):
         data = self.build()
-        stable = dict(data, t="", health=dict(data["health"], loop_age=int(data["health"]["loop_age"] // 60), uptime=""))
+        stable = dict(data, t="", health=dict(data["health"], loop_age=int(data["health"]["loop_age"] // 60), busy=int(data["health"]["busy"] // 60), uptime=""))
         tag = hashlib.md5(json.dumps(stable, ensure_ascii=False, default=str, sort_keys=True).encode()).hexdigest()[:16]
         with self.lock:
             if '"%s"' % tag == self.etag:
@@ -273,7 +274,7 @@ $('depts').onclick=e=>{const el=e.target.closest('.dp');if(!el)return;sel=sel===
 document.addEventListener('click',e=>{const tr=e.target.closest('tr[data-s]');if(tr){showChart(tr.dataset.s);$('chart').scrollIntoView({behavior:'smooth',block:'center'});}});
 function render(){
 $('mode').innerHTML=D.mode.startsWith('live')?'<span class="live">เงินจริง'+esc(D.mode.slice(4))+'</span>':'<span class="m">'+esc(D.mode)+'</span>';
-const H=D.health;put('strip',`<span>${H.loop_age<180?'🟢 ทำงานอยู่':'🔴 ลูปหลักไม่ขยับ '+Math.floor(H.loop_age/60)+' นาที'}</span><span>อัปเดต ${esc(D.t.slice(11,19))}</span><span>เปิดมาแล้ว ${H.uptime}</span>${H.down?'<span class="a">⚠️ '+esc(H.down)+'</span>':''}`);
+const H=D.health;put('strip',`<span>${H.loop_age<180?'🟢 ทำงานอยู่':(H.busy&&H.busy<900)?'🟡 กำลังสแกน/ประชุม AI '+Math.max(1,Math.floor(H.busy/60))+' นาที':'🔴 ลูปหลักไม่ขยับ '+Math.floor(H.loop_age/60)+' นาที'}</span><span>อัปเดต ${esc(D.t.slice(11,19))}</span><span>เปิดมาแล้ว ${H.uptime}</span>${H.down?'<span class="a">⚠️ '+esc(H.down)+'</span>':''}`);
 $('eq').textContent=f(D.equity);$('q').textContent=D.quote||'USDT';$('day').innerHTML='<span class="'+c(D.day_pct)+'">'+(D.day_pct>0?'+':'')+f(D.day_pct)+'%</span>';
 $('pnl').innerHTML='<span class="'+c(D.summary.realized_pnl)+'">'+f(D.summary.realized_pnl)+'</span>';
 $('wr').textContent=D.summary.wins+' / '+D.summary.trades+' ('+D.summary.win_rate+'%)';$('reg').textContent=D.regime;

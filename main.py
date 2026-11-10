@@ -70,6 +70,7 @@ class Company:
         self.status = "starting"
         self.line = LineNotifier(cfg)
         self.last_ok = time.time()
+        self.cycle_started = None
         self.sell_queue = []  # คำสั่งขายจาก LINE รอทำในลูปหลัก
         self.started_at = time.time()
         self.last_eq = None       # มูลค่าพอร์ตล่าสุด (แดชบอร์ด/LINE อ่านค่านี้ ไม่ต้องยิงถาม Binance ทุกครั้ง)
@@ -408,6 +409,7 @@ class Company:
         fails = 0
         while True:
             try:
+                self.cycle_started = time.time()  # ระหว่างรอบ (สแกน/ประชุม AI) อาจนานหลายนาที: หน้าเว็บจะไม่ขึ้นแดงหลอก
                 self.cycle()
                 if fails >= 3:
                     self.line.send("✅ บอทกลับมาทำงานปกติแล้ว", key="recovered", every_sec=600)
@@ -422,6 +424,7 @@ class Company:
                                    key="err", every_sec=3600, urgent=True)
                 time.sleep(30)
             self.last_ok = time.time()
+            self.cycle_started = None
             time.sleep(self.cfg.get("loop_seconds", 30))
 
 
