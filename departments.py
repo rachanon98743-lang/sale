@@ -660,10 +660,17 @@ class AIAnalystDept:
         if not self.enabled or self.budget_status()[2]:
             return None
         try:
-            return self._call(purpose="รายงานประจำวัน", prompt="เขียนรายงานผู้บริหารสั้นๆ ภาษาไทย 5 บรรทัด จากข้อมูลพอร์ตเทรดคริปโตนี้ "
-                              "บอกสิ่งที่ได้ผล สิ่งที่ควรระวัง ห้ามแนะนำเพิ่มความเสี่ยง:\n" + json.dumps(summary, ensure_ascii=False), max_tokens=500)
+            return self._call(purpose="รายงานประจำวัน", prompt=DAILY_LETTER_PROMPT + json.dumps(summary, ensure_ascii=False),
+                              max_tokens=700)
         except Exception:
             return None
+
+
+DAILY_LETTER_PROMPT = (
+    "คุณเป็นผู้จัดการกองทุน เขียนรายงานประจำวันภาษาไทยไม่เกิน 8 บรรทัด จากข้อมูลบอทเทรดคริปโตด้านล่าง\n"
+    "1) วันนี้ได้/เสียเพราะอะไร 2) ไม้ที่แพ้วันนี้ (today_trades ที่ pnl ติดลบ) แพ้เพราะอะไร อ้างเหตุผลขายและตัวเลข "
+    "3) สิ่งที่ได้ผล 4) พรุ่งนี้ควรระวังอะไร (ดูข่าว news) 5) ข้อเสนอปรับ 1 ข้อที่ช่วยรักษาเงินต้น\n"
+    "ห้ามแนะนำเพิ่มความเสี่ยงหรือเพิ่มขนาดไม้ ถ้าวันนี้ไม่มีเทรดให้บอกสั้นๆ ว่าทำไม ตอบเป็นข้อความธรรมดา ไม่ใช้ markdown:\n")
 
 
 # ===================================================================== 3b. Gemini Analyst (ความเห็นที่สอง)
@@ -714,8 +721,8 @@ class GeminiAnalystDept:
         lim = {"day_calls": int(self.setting("gemini_daily_calls", 300)),          # แบบจ่ายเงิน: ไม่ติดโควตาฟรี 250 ครั้ง
                "day_tokens": int(self.setting("gemini_daily_token_limit", 1000000)),
                "month_tokens": int(self.setting("gemini_monthly_token_limit", 20000000)),
-               "day_usd": float(self.setting("gemini_daily_budget_usd", 0.3)),
-               "month_usd": float(self.setting("gemini_monthly_budget_usd", 5)),
+               "day_usd": float(self.setting("gemini_daily_budget_usd", 0.08)),
+               "month_usd": float(self.setting("gemini_monthly_budget_usd", 1.4)),  # เพดานใน AI Studio 50 บาท/เดือน
                "max_tokens_per_call": int(self.setting("gemini_max_tokens_per_call", 2048)),
                "paid": bool(self.setting("gemini_paid", True))}  # เจ้าของอัปเกรด Gemini API เป็นแบบจ่ายเงินแล้ว
         over = []
@@ -726,38 +733,219 @@ class GeminiAnalystDept:
         if lim["paid"] and u["month_usd"] >= lim["month_usd"]: over.append("งบรายเดือน $%.2f" % lim["month_usd"])
         return u, lim, over
 
-    def _call(self, prompt, purpose="", max_tokens=2048):
+    def _call(self, prompt, purpose="", max_tokens=2048, search=False, model=None, json_mode=True):
+        """search=True = เปิดเครื่องมือ Google Search (grounding) ให้ Gemini ค้นข่าวล่าสุดเอง
+        model = ใช้รุ่นที่ระบุก่อน (เช่นรุ่น lite สำหรับงานเบา) ถ้าเรียกไม่ได้จะไล่รุ่นสำรองให้เอง"""
         _, lim, over = self.budget_status()
         if over:
             raise RuntimeError("ถึงเพดาน " + ", ".join(over))
         max_tokens = min(max_tokens, lim["max_tokens_per_call"])
-        body = json.dumps({"contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                           "generationConfig": {"temperature": 0.2, "maxOutputTokens": max_tokens,
-                                                "responseMimeType": "application/json"}}).encode()
+        gen = {"temperature": 0.2, "maxOutputTokens": max_tokens}
+        if json_mode and not search:  # เปิดค้นเว็บใช้คู่กับบังคับ JSON ไม่ได้ในบางรุ่น → ขอ JSON ในข้อความแทน
+            gen["responseMimeType"] = "application/json"
+        req_body = {"contents": [{"role": "user", "parts": [{"text": prompt}]}], "generationConfig": gen}
+        if search:
+            req_body["tools"] = [{"google_search": {}}]
+        body = json.dumps(req_body).encode()
         tried, err = [], None
-        for m in dict.fromkeys((self.model, self.setting("gemini_model", "gemini-flash-latest")) + self.FALLBACK):
+        first = (model,) if model else ()
+        for m in dict.fromkeys(first + (self.model, self.setting("gemini_model", "gemini-flash-latest")) + self.FALLBACK):
             tried.append(m)
             req = urllib.request.Request(self.URL % m, data=body, method="POST",
                                          headers={"x-goog-api-key": self.key, "content-type": "application/json"})
             try:
-                with urllib.request.urlopen(req, timeout=60) as r:
+                with urllib.request.urlopen(req, timeout=90 if search else 60) as r:
                     data = json.loads(r.read())
             except urllib.error.HTTPError as e:
                 err = "HTTP %s %s" % (e.code, e.read()[:150].decode("utf-8", "ignore"))
-                if e.code == 404:   # รุ่นนี้ไม่มี/เลิกใช้แล้ว ลองรุ่นถัดไป
+                if e.code == 404 or (e.code == 400 and (search or model)):  # รุ่นนี้ไม่มี/ไม่รองรับเครื่องมือ ลองรุ่นถัดไป
                     continue
                 raise RuntimeError(err)
-            self.working = m
+            if not model:
+                self.working = m
             us = data.get("usageMetadata", {})
-            tin = us.get("promptTokenCount", 0)
+            tin = us.get("promptTokenCount", 0) + us.get("toolUsePromptTokenCount", 0)
             tout = us.get("candidatesTokenCount", 0) + us.get("thoughtsTokenCount", 0)
-            parts = ((data.get("candidates") or [{}])[0].get("content") or {}).get("parts", [])
+            cand = (data.get("candidates") or [{}])[0]
+            parts = (cand.get("content") or {}).get("parts", [])
             text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
             pin, pout = self.price(m)
             est = tin / 1e6 * pin + tout / 1e6 * pout  # ค่าใช้จ่ายโดยประมาณจากราคาต่อ token
+            nq = len((cand.get("groundingMetadata") or {}).get("webSearchQueries") or [])
+            if nq:
+                purpose += " · ค้น Google %d ครั้ง" % nq
             self.acct.add_ai_call(purpose, m, tin, tout, est, text[:600])
             return text
         raise RuntimeError("ไม่มีรุ่น Gemini ที่ใช้ได้ (%s): %s" % (", ".join(tried), err))
+
+    @staticmethod
+    def _json(text):
+        t = text.replace("```json", "").replace("```", "")
+        return json.loads(t[t.index("{"):t.rindex("}") + 1])
+
+    def month_frac(self):
+        """ใช้งบ Gemini เดือนนี้ไปกี่ส่วน (0-1)"""
+        u, lim, _ = self.budget_status()
+        return u["month_usd"] / lim["month_usd"] if lim["paid"] and lim["month_usd"] else 0
+
+    def extra_ok(self):
+        """งานเสริม (สแกนข่าว/หาเหรียญน่าจับตา/สรุป) ทำเมื่องบเดือนยังเหลือ เก็บส่วนท้ายไว้ให้งานประชุมหลักเสมอ"""
+        return self.enabled and self.month_frac() < float(self.setting("gemini_extra_stop_frac", 0.8))
+
+    # ---------------------------------------------------------- ข่าว (Google Search)
+    def _sym(self, s):
+        s = str(s or "").upper().replace("/", "").strip()
+        return s if not s or s.endswith("USDT") else s + "USDT"
+
+    def blocked(self):
+        """เหรียญที่ห้ามซื้อเพราะข่าวร้าย (ยังไม่หมดเวลา) {SYMBOL: {"reason", "until"}}"""
+        now = time.time()
+        return {k: v for k, v in ((self.acct.get("news") or {}).get("block") or {}).items() if v.get("until", 0) > now}
+
+    def _news_call(self, coins, focus):
+        today = now_th().strftime("%Y-%m-%d")
+        prompt = (
+            "วันนี้ %s คุณเป็นฝ่ายข่าวกรองของกองทุนคริปโต (เทรด spot ระยะสั้น 1-3 วัน บน Binance TH) "
+            "ใช้ Google Search ค้นข่าวล่าสุดภายใน 48 ชั่วโมง %s\n"
+            "เหรียญที่ต้องเช็ก: %s\n\n"
+            "ข่าวร้ายที่ต้องห้ามซื้อ: ถูกแฮ็ก/exploit, ถูกถอดหรือพักการเทรดจากกระดานใหญ่, ปลดล็อกโทเคนก้อนใหญ่ภายใน 7 วัน, "
+            "ทีมเทขาย/rug, ถูกฟ้องหรือหน่วยงานกำกับสั่งห้าม, เครือข่ายล่ม\n"
+            "ห้ามเดา ถ้าค้นไม่เจอข่าวของเหรียญไหนก็ไม่ต้องใส่ ใส่เฉพาะที่มีแหล่งข่าวจริง\n"
+            "ตอบ JSON อย่างเดียว ภาษาไทยสั้นๆ: {\"mood\":\"บวก/กลาง/ลบ\",\"risk\":\"low/mid/high\","
+            "\"summary\":\"สรุปภาพรวมข่าวตลาด 1-2 ประโยค\","
+            "\"block\":[{\"symbol\":\"XXX\",\"reason\":\"ข่าวอะไร ≤20 คำ\",\"hours\":24}],"
+            "\"good\":[{\"symbol\":\"YYY\",\"reason\":\"ข่าวดีอะไร ≤20 คำ\"}],"
+            "\"events\":[\"เหตุการณ์สำคัญที่จะกระทบตลาดใน 24 ชม. เช่น ประกาศดอกเบี้ย/CPI\"]}"
+        ) % (today, focus, ", ".join(coins))
+        text = self._call(prompt, purpose="ฝ่ายข่าว: " + ", ".join(coins[:6]) + ("…" if len(coins) > 6 else ""),
+                          max_tokens=1500, search=True, model=self.setting("gemini_news_model", None))
+        return self._json(text)
+
+    def _merge_news(self, j, full):
+        old = self.acct.get("news") or {}
+        now = time.time()
+        block = {k: v for k, v in (old.get("block") or {}).items() if v.get("until", 0) > now}
+        new_block = {}
+        for b in j.get("block") or []:
+            s = self._sym(b.get("symbol"))
+            if s:
+                hrs = max(6, min(168, float(b.get("hours") or 24)))
+                new_block[s] = {"reason": str(b.get("reason", ""))[:160], "until": now + hrs * 3600,
+                                "t": now_th().isoformat(timespec="minutes")}
+        block.update(new_block)
+        out = dict(old)
+        out["block"] = block
+        if full:
+            out.update(ts=now, t=now_th().isoformat(timespec="minutes"), mood=str(j.get("mood", ""))[:20],
+                       risk=str(j.get("risk", ""))[:10], summary=str(j.get("summary", ""))[:300],
+                       good=[{"symbol": self._sym(g.get("symbol")), "reason": str(g.get("reason", ""))[:160]}
+                             for g in (j.get("good") or []) if g.get("symbol")][:5],
+                       events=[str(e)[:160] for e in (j.get("events") or [])][:4])
+        self.acct.set("news", out)
+        return new_block
+
+    def news_scan(self, held, top):
+        """สแกนข่าวตลาด + เหรียญที่ถือ/เหรียญเด่น ทุก gemini_news_every_min นาที (ค่าเริ่ม 180)
+        คืนเหรียญที่ถืออยู่แต่เจอข่าวร้าย (ให้ CEO แจ้งเตือน)"""
+        if not self.extra_ok() or not self.setting("gemini_news_enabled", True):
+            return {}
+        last = self.acct.get("news") or {}
+        if time.time() - last.get("ts", 0) < float(self.setting("gemini_news_every_min", 180)) * 60:
+            return {}
+        held = [self._sym(s) for s in held]
+        syms = list(dict.fromkeys(held + [self._sym(s) for s in top]))[:20]
+        coins = ["BTC", "ETH"] + [s[:-4] for s in syms if s[:-4] not in ("BTC", "ETH")]
+        try:
+            j = self._news_call(coins, "ของตลาดคริปโตโดยรวม และของเหรียญต่อไปนี้")
+        except Exception as e:
+            self.last_err = str(e)[:200]
+            self.acct.set("news", dict(last, ts=time.time()))  # ไม่ลองซ้ำถี่ๆ ถ้าพลาด
+            self.log(self.name, "สแกนข่าวไม่สำเร็จ (%s) ระบบเดิมทำงานต่อ" % self.last_err)
+            return {}
+        nb = self._merge_news(j, full=True)
+        n = self.acct.get("news") or {}
+        self.log(self.name, "📰 ข่าวตลาด (%s เสี่ยง %s): %s" % (n.get("mood", "-"), n.get("risk", "-"), n.get("summary", "")))
+        if nb:
+            self.log(self.name, "📰 งดซื้อเพราะข่าว: " + " · ".join("%s (%s)" % (s[:-4], v["reason"]) for s, v in nb.items()))
+        for g in n.get("good") or []:
+            self.log(self.name, "📰 ข่าวดี %s: %s" % (g["symbol"][:-4], g["reason"]))
+        return {s: v for s, v in nb.items() if s in held}
+
+    def check_symbols(self, symbols):
+        """เช็กข่าวเหรียญที่กำลังจะซื้อ (ที่ยังไม่ได้เช็กใน gemini_news_recheck_min นาที) ก่อนเข้าประชุม"""
+        if not self.extra_ok() or not self.setting("gemini_news_enabled", True):
+            return self.blocked()
+        seen = self.acct.get("news_checked") or {}
+        now = time.time()
+        ttl = float(self.setting("gemini_news_recheck_min", 240)) * 60
+        todo = [s for s in dict.fromkeys(symbols) if now - seen.get(s, 0) > ttl][:6]
+        if todo:
+            try:
+                j = self._news_call([s.replace("USDT", "") for s in todo], "เฉพาะเหรียญต่อไปนี้ ก่อนที่กองทุนจะซื้อ")
+                nb = self._merge_news(j, full=False)
+                for s in todo:
+                    seen[s] = now
+                self.acct.set("news_checked", {k: v for k, v in seen.items() if now - v < 86400})
+                self.log(self.name, "📰 เช็กข่าวก่อนซื้อ %s: %s" % (", ".join(s[:-4] for s in todo),
+                         " · ".join("%s ❌ %s" % (s[:-4], v["reason"]) for s, v in nb.items() if s in todo) or "ไม่พบข่าวร้าย ✅"))
+            except Exception as e:
+                self.last_err = str(e)[:200]
+                self.log(self.name, "เช็กข่าวก่อนซื้อไม่สำเร็จ (%s) ใช้ผลข่าวรอบก่อน" % self.last_err)
+        return self.blocked()
+
+    def news_brief(self):
+        n = self.acct.get("news") or {}
+        if not n.get("t"):
+            return {}
+        return {"t": n["t"], "mood": n.get("mood"), "risk": n.get("risk"), "summary": n.get("summary"),
+                "events": n.get("events", []), "blocked": {k[:-4]: v["reason"] for k, v in self.blocked().items()}}
+
+    # ---------------------------------------------------------- หาเหรียญน่าจับตา (ใช้รุ่นเบา)
+    def scout(self, research, held):
+        """รอบที่ไม่มีข้อเสนอซื้อ: ให้ Gemini ไล่ดูเหรียญที่สแกนมาแล้วเลือกตัวน่าจับตา ส่งเข้าช่องทางด่วนทุก 5 นาที
+        ทำทุก gemini_scout_every_min นาที (ค่าเริ่ม 60) ด้วยรุ่น lite ราคาถูก"""
+        if not self.extra_ok() or not research or not self.setting("gemini_scout_enabled", True):
+            return None
+        if time.time() - float(self.acct.get("scout_ts") or 0) < float(self.setting("gemini_scout_every_min", 60)) * 60:
+            return None
+        self.acct.set("scout_ts", time.time())
+        keys = ("symbol", "price", "score", "setup", "rsi", "mom", "chg24", "ext", "htf", "structure", "adx", "rs_btc",
+                "support", "resistance", "warn")
+        rnd = lambda p: {k: (round(p[k], 4) if isinstance(p[k], float) else p[k]) for k in keys if k in p}
+        rows = [rnd(r) for r in research if r.get("symbol") not in held][:25]
+        if not rows:
+            return None
+        blocked = list(self.blocked())
+        prompt = (
+            "คุณเป็นนักวิเคราะห์คริปโต spot ของกองทุน รอบนี้ยังไม่มีเหรียญผ่านเกณฑ์ซื้อ "
+            "ช่วยไล่ดูข้อมูลสแกนด้านล่าง (score 0-100 ยิ่งสูงยิ่งใกล้เกณฑ์, ext = ห่างจาก EMA20, htf = แนวโน้มใหญ่) "
+            "แล้วเลือกเหรียญที่น่าจะเข้าเงื่อนไขซื้อเร็วๆ นี้ไม่เกิน 4 ตัว บอกว่ารอสัญญาณอะไร (ระดับราคา/อินดิเคเตอร์)\n"
+            "ห้ามเลือก: %s\nข่าวล่าสุด: %s\nข้อมูล: %s\n"
+            "ตอบ JSON อย่างเดียว: {\"watch\":[{\"symbol\":\"XXXUSDT\",\"reason\":\"≤20 คำ\"}],\"market\":\"1 ประโยค\"}"
+        ) % (", ".join(blocked) or "-", json.dumps(self.news_brief(), ensure_ascii=False), json.dumps(rows, ensure_ascii=False))
+        try:
+            j = self._json(self._call(prompt, purpose="หาเหรียญน่าจับตา %d ตัว" % len(rows), max_tokens=800,
+                                      model=self.setting("gemini_scout_model", "gemini-flash-lite-latest")))
+        except Exception as e:
+            self.last_err = str(e)[:200]
+            self.log(self.name, "หาเหรียญน่าจับตาไม่สำเร็จ (%s)" % self.last_err)
+            return None
+        ok = {r["symbol"] for r in rows}
+        watch = [{"symbol": self._sym(w.get("symbol")), "reason": str(w.get("reason", ""))[:200]}
+                 for w in j.get("watch") or [] if self._sym(w.get("symbol")) in ok and self._sym(w.get("symbol")) not in blocked][:4]
+        if watch:
+            self.log(self.name, "👀 น่าจับตา (เช็กทุก 5 นาที): " + " · ".join("%s (%s)" % (w["symbol"], w["reason"]) for w in watch))
+        return {"watch": watch, "market": str(j.get("market", ""))[:200]}
+
+    # ---------------------------------------------------------- รายงานประจำวัน (สำรองเมื่อ Claude ไม่ว่าง)
+    def daily_letter(self, summary):
+        if not self.enabled:
+            return None
+        try:
+            return self._call(DAILY_LETTER_PROMPT + json.dumps(summary, ensure_ascii=False),
+                              purpose="รายงานประจำวัน (สำรอง)", max_tokens=900, json_mode=False).strip()
+        except Exception:
+            return None
 
     def analyze(self, proposals, regime, track=None, research=None):
         """คืน {"views": {symbol: {"view": buy/wait/avoid, "confidence": 0-100, "reason": ...}}, "watch": [...], "market": "..."}"""
@@ -766,9 +954,9 @@ class GeminiAnalystDept:
         keys = ("symbol", "price", "score", "setup", "why", "sl_pct", "tp_pct", "rsi", "mom", "chg24", "ext", "htf",
                 "structure", "adx", "rs_btc", "support", "resistance", "warn", "bt")
         rnd = lambda p: {k: (round(p[k], 4) if isinstance(p[k], float) else p[k]) for k in keys if k in p}
-        brief = [rnd(p) for p in proposals[:8]]
+        brief = [rnd(p) for p in proposals[:12]]
         prop_syms = {p["symbol"] for p in proposals}
-        others = [rnd(r) for r in (research or []) if r.get("symbol") not in prop_syms][:12]
+        others = [rnd(r) for r in (research or []) if r.get("symbol") not in prop_syms][:20]
         prompt = (
             "คุณเป็นนักวิเคราะห์คริปโตอาวุโสของกองทุน เทรด spot เท่านั้น (ไม่มี short ไม่มีเลเวอเรจ) "
             "หน้าที่: วิเคราะห์อิสระแล้วส่งความเห็นเข้าที่ประชุมกับผู้จัดการความเสี่ยงอีกคน\n%s\n\n"
@@ -786,7 +974,7 @@ class GeminiAnalystDept:
              json.dumps(brief, ensure_ascii=False), json.dumps(others, ensure_ascii=False))
         try:
             text = self._call(prompt, purpose="วิเคราะห์ข้อเสนอ %d ตัว + หาเหรียญน่าจับตา" % len(brief))
-            j = json.loads(text[text.index("{"):text.rindex("}") + 1])
+            j = self._json(text)
         except Exception as e:
             self.last_err = str(e)[:200]
             self.log(self.name, "วิเคราะห์ไม่สำเร็จ (%s) ที่ประชุมใช้ความเห็น Claude/กฎอย่างเดียว" % self.last_err)

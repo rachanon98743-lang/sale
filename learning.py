@@ -17,9 +17,9 @@ from datetime import datetime, timedelta
 
 from departments import FEATURE_TH, RISK_PROFILES, now_th
 
-STAGE_TH = {"bought": "ซื้อจริง", "strategy": "ฝ่ายกลยุทธ์คัดออก", "claude": "Claude ปฏิเสธ", "gemini": "Gemini ค้าน",
+STAGE_TH = {"news": "ข่าวร้าย (งดซื้อ)", "bought": "ซื้อจริง", "strategy": "ฝ่ายกลยุทธ์คัดออก", "claude": "Claude ปฏิเสธ", "gemini": "Gemini ค้าน",
             "full": "ถือครบเพดาน", "risk": "ฝ่ายความเสี่ยงไม่อนุมัติ", "liquidity": "สภาพคล่องไม่ผ่าน"}
-DEPT_STAGE = {"ฝ่ายกลยุทธ์": "strategy", "ฝ่ายนักวิเคราะห์ AI": "claude", "ฝ่ายวิเคราะห์ Gemini": "gemini",
+DEPT_STAGE = {"ฝ่ายข่าว": "news", "ฝ่ายกลยุทธ์": "strategy", "ฝ่ายนักวิเคราะห์ AI": "claude", "ฝ่ายวิเคราะห์ Gemini": "gemini",
               "ฝ่ายบริหารความเสี่ยง": "risk"}
 
 

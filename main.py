@@ -234,7 +234,10 @@ class Company:
         held = {p["symbol"] for p in self.acct.open_positions()}
         if full:
             self.last_research = self.research.scan(self.risk)
-            self.trade_round(self.last_research, guard, eq, held, "สั่งงานรอบนี้")
+            self.news_round(held)
+            n_prop = self.trade_round(self.last_research, guard, eq, held, "สั่งงานรอบนี้")
+            if not n_prop:
+                self.scout_round(held)
         else:
             self.fast_lane(cfg, guard, eq, held)
         self.save_paper()
@@ -266,14 +269,63 @@ class Company:
                 len(watch), len(fresh), ", ".join("%s(%d %s)" % (r["symbol"], r["score"], r["setup"]) for r in fresh)))
             self.trade_round(fresh, guard, eq, held, "ช่องทางด่วน")
 
+    def news_round(self, held):
+        """ฝ่ายข่าว (Gemini + Google Search): สแกนข่าวตลาดทุก ~3 ชม. ถ้าเหรียญที่ถืออยู่มีข่าวร้าย แจ้ง LINE ทันที"""
+        try:
+            top = [r["symbol"] for r in self.last_research[:12]]
+            bad = self.gemini.news_scan(held, top)
+        except Exception as e:
+            self.log("ฝ่ายวิเคราะห์ Gemini", "สแกนข่าวผิดพลาด: %s" % e)
+            return
+        for s, v in bad.items():
+            self.log("ฝ่ายวิเคราะห์ Gemini", "🚨 ข่าวร้ายเหรียญที่ถืออยู่ %s: %s\nพิจารณาขายได้ด้วยคำสั่ง LINE \"ขาย %s\" (บอทยังเฝ้า stop loss ให้อยู่)" % (
+                s, v["reason"], s.replace(self.ex.quote, "")), line=True, key="newsbad_" + s, every=3600 * 12, urgent=True)
+
+    def scout_round(self, held):
+        """รอบที่ไม่มีข้อเสนอ: Gemini (รุ่นเบา) เลือกเหรียญน่าจับตา ส่งเข้าช่องทางด่วนเช็กทุก 5 นาที"""
+        try:
+            sc = self.gemini.scout(self.last_research, held)
+        except Exception as e:
+            self.log("ฝ่ายวิเคราะห์ Gemini", "หาเหรียญน่าจับตาผิดพลาด: %s" % e)
+            return
+        if sc and sc.get("watch"):
+            m = dict(self.acct.get("last_meeting") or {"t": now_th().isoformat(timespec="seconds"), "views": {}, "minutes": []})
+            m.update(watch=sc["watch"], regime=self.regime, market=sc.get("market") or m.get("market", ""))
+            self.acct.set("last_meeting", m)
+
+    def news_filter(self, props):
+        """ตัดเหรียญที่มีข่าวร้ายออกก่อนเข้าประชุม (เช็กข่าวสดของเหรียญที่จะซื้อด้วย Google Search)"""
+        if not props or not self.gemini.enabled:
+            return props
+        try:
+            blocked = self.gemini.check_symbols([p["symbol"] for p in props])
+        except Exception as e:
+            self.log("ฝ่ายวิเคราะห์ Gemini", "เช็กข่าวผิดพลาด: %s" % e)
+            return props
+        out = []
+        for p in props:
+            b = blocked.get(p["symbol"])
+            if b:
+                self.log("ฝ่ายวิเคราะห์ Gemini", "ไม่ซื้อ %s: ข่าวร้าย – %s" % (p["symbol"], b["reason"]))
+                self.acct.add_decision("ฝ่ายข่าว", p["symbol"], False, "ข่าวร้าย: " + b["reason"])
+                self.news_rejected[p["symbol"]] = "news"  # ฝ่ายพัฒนากลยุทธ์ติดตามว่างดเพราะข่าวแล้วถูกไหม
+            else:
+                out.append(p)
+        return out
+
     def trade_round(self, research, guard, eq, held, label):
-        """กลยุทธ์ → Gemini วิเคราะห์ → ประชุมกับ Claude → ความเสี่ยง → สภาพคล่อง → ส่งคำสั่ง"""
+        """กลยุทธ์ → เช็กข่าว → Gemini วิเคราะห์ → ประชุมกับ Claude → ความเสี่ยง → สภาพคล่อง → ส่งคำสั่ง
+        คืนจำนวนข้อเสนอจากฝ่ายกลยุทธ์"""
         props = self.strategy.proposals(research, self.risk, held, self.regime, extra_score=guard["score_add"])
         all_props = list(props)
         self.ai.rejected_by = {}
+        self.news_rejected = {}
         n_prop = len(props)
         if props and self.riskd.slots_left(self.risk, self.regime, len(held), guard) > 0:
+            props = self.news_filter(props)
+        if props and self.riskd.slots_left(self.risk, self.regime, len(held), guard) > 0:
             track = self.acct.track_record()
+            track["news"] = self.gemini.news_brief()              # ข่าวล่าสุดจาก Google Search ให้ทั้ง Gemini และ Claude ใช้
             track["lessons"] = self.learning.lessons()          # บทเรียนจากผลที่ผ่านมา ให้ AI ใช้ตัดสิน
             track["capital_guard"] = guard["name"]
             g = self.gemini.analyze(props, self.regime, track, self.last_research)  # Gemini วิเคราะห์ก่อน
@@ -306,15 +358,17 @@ class Company:
             except Exception as e:
                 self.log("ฝ่ายเทรด", "ซื้อ %s ไม่สำเร็จ: %s" % (o["symbol"], e))
                 self.acct.add_decision("ฝ่ายเทรด", o["symbol"], False, "ส่งคำสั่งซื้อไม่สำเร็จ: %s" % e)
+        self.ai.rejected_by.update(self.news_rejected)
         self.learning.record_round(getattr(self.strategy, "rejected", []), all_props, self.ai.rejected_by, orders,
                                    set(bought), liq_fail, getattr(self.riskd, "last_full", set()))
         if label == "ช่องทางด่วน" and not n_prop:
-            return
+            return n_prop
         # CEO สรุปงานทุกรอบ: เห็นว่าบอททำงานอยู่ แม้ไม่มีใครเปิดแดชบอร์ด
         self.log("CEO", "%s: วิจัย %d เหรียญ → กลยุทธ์เสนอ %d → ผ่านประชุม AI %d → ซื้อ %d%s · ถือ %d/%d ไม้ · ตลาด %s%s" % (
             label, len(research), n_prop, n_ok, len(bought), (" (%s)" % ", ".join(bought)) if bought else "",
             len(self.acct.open_positions()), RISK_PROFILES[self.risk]["max_pos"], self.regime,
             "" if guard["level"] == 0 and guard["size"] >= 1 else " · " + guard["name"] + (" ไม้ x%.2g" % guard["size"])))
+        return n_prop
 
     def daily_report(self):
         today = now_th().date().isoformat()
@@ -323,7 +377,16 @@ class Company:
         s = self.acct.summary()
         s["equity"] = round(self.equity(), 2)
         s["mode"], s["risk"], s["regime"] = self.mode, self.risk, self.regime
-        letter = self.ai.daily_letter(s)
+        info = dict(s)
+        info["today_trades"] = [{"symbol": p["symbol"], "pnl": round(p["pnl"] or 0, 2),
+                                 "pnl_pct": round((p["pnl"] or 0) / p["cost"] * 100, 2) if p["cost"] else 0,
+                                 "why_buy": (p.get("why") or "")[:120], "exit_reason": p.get("reason"),
+                                 "opened": (p.get("opened") or "")[11:16], "closed": (p.get("closed") or "")[11:16]}
+                                for p in self.acct.closed_positions(40) if (p.get("closed") or "").startswith(today)]
+        info["news"] = self.gemini.news_brief()
+        info["rejected_today"] = len([d for d in self.acct.recent_decisions(200, only_rejected=True) if d["t"].startswith(today)])
+        # Claude (ผู้ตัดสินหลัก) เขียนรายงาน ถ้า Claude ไม่ว่าง/หมดงบ ให้ Gemini เขียนแทน
+        letter = self.ai.daily_letter(info) or self.gemini.daily_letter(info)
         self.log("CEO", "รายงานประจำวัน: " + json.dumps(s, ensure_ascii=False))
         if letter:
             self.log("CEO", "บทสรุปจาก AI: " + letter.replace("\n", " "))
@@ -339,6 +402,10 @@ class Company:
                 ("💡 " + rv["tips"][0]) if rv["tips"] else "") + (("\n\n" + letter) if letter else "")).strip()
         except Exception as e:
             self.log("ฝ่ายพัฒนากลยุทธ์", "สรุปผลไม่สำเร็จ: %s" % e)
+        nb = self.gemini.news_brief()
+        if nb.get("summary"):
+            letter = ((letter or "") + "\n\n📰 ข่าว (%s): %s%s" % (nb["t"][11:16], nb["summary"],
+                      ("\n⛔ งดซื้อ: " + ", ".join(nb["blocked"])) if nb.get("blocked") else "")).strip()
         self.line.send("📊 สรุปประจำวัน %s (%s)\nมูลค่าพอร์ต: %.2f %s (วันนี้ %+.2f%%)\nกำไร/ขาดทุนสะสม: %+.2f\n"
                        "เทรดแล้ว %d ไม้ ชนะ %s%% | ถืออยู่ %d ไม้\nตลาด: %s\n(ได้ข้อความนี้ทุกคืน = บอทยังทำงานอยู่)%s" % (
                            today, self.mode_label(), s["equity"], self.ex.quote, chg, s["realized_pnl"],

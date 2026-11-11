@@ -36,6 +36,7 @@ HELP = """📋 คำสั่งที่ใช้ได้ (กดปุ่ม
 • แผนก – งานล่าสุดของทุกแผนก (แตะดูทีละแผนก)
 • ไม่อนุมัติ – เหรียญที่ไม่ซื้อ พร้อมเหตุผลของแต่ละฝ่าย
 • ประชุม – ผลประชุม Gemini + Claude ล่าสุด ว่าควรเทรดตัวไหน
+• ข่าว – ข่าวคริปโตล่าสุดที่ Gemini ค้นจาก Google + เหรียญที่งดซื้อเพราะข่าว
 • ทบทวน – ผลเทรด 30 วัน บทเรียน ระดับป้องกันเงินต้น พร้อมใช้เงินจริงไหม
 • คาดการณ์ – ไม้ที่ถือ ถ้าถึงเป้า/โดนตัด ได้เสียเท่าไร
 • แดชบอร์ด – ลิงก์เปิดหน้าแดชบอร์ด (เปิด Tailscale ก่อน)
@@ -64,7 +65,7 @@ DEPTS = [("👔", "CEO", ("ceo", "ซีอีโอ")),
          ("📒", "ฝ่ายบัญชี", ("บัญชี",))]
 SHORT = {"CEO": "CEO", "ฝ่ายวิจัยตลาด": "วิจัย", "ฝ่ายกลยุทธ์": "กลยุทธ์", "ฝ่ายนักวิเคราะห์ AI": "AI", "ฝ่ายวิเคราะห์ Gemini": "Gemini", "ฝ่ายพัฒนากลยุทธ์": "พัฒนา",
          "ฝ่ายบริหารความเสี่ยง": "ความเสี่ยง", "ฝ่ายเทรด": "เทรด", "ฝ่ายบัญชี": "บัญชี"}
-MAIN_QR = ["สถานะ", "แผนก", "ประชุม", "ทบทวน", "ไม่อนุมัติ", "คาดการณ์", "ไม้ที่ถือ", "สรุปวันนี้", "แดชบอร์ด", "ช่วยเหลือ"]
+MAIN_QR = ["สถานะ", "แผนก", "ประชุม", "ข่าว", "ทบทวน", "ไม่อนุมัติ", "คาดการณ์", "ไม้ที่ถือ", "สรุปวันนี้", "แดชบอร์ด", "ช่วยเหลือ"]
 
 
 def dept_of(t):
@@ -159,6 +160,8 @@ class LineBot:
             return self.rejections_text()
         if t in ("ทบทวน", "ทบทวนกลยุทธ์", "รีวิว", "review", "ผลเรียนรู้", "พัฒนากลยุทธ์", "บทเรียน"):
             return self.review_text()
+        if t in ("ข่าว", "ข่าวล่าสุด", "news", "ข่าวคริปโต"):
+            return self.news_text()
         if t in ("ประชุม", "ผลประชุม", "ประชุมai", "ควรเทรดตัวไหน", "เทรดตัวไหน", "ตัวไหนดี", "meeting"):
             return self.meeting_text()
         if t in ("คาดการณ์", "พยากรณ์", "forecast", "คาดการ"):
@@ -281,6 +284,33 @@ class LineBot:
             out += ["• %s – %s" % (w["symbol"].replace(co.ex.quote, ""), w["reason"]) for w in m["watch"]]
         out.append("\nผ่านประชุมแล้วยังต้องผ่านฝ่ายความเสี่ยง (เพดานไม้/เงิน/สภาพคล่อง) ก่อนซื้อจริง")
         return "\n".join(out)[:4800], ["Gemini", "AI", "ไม่อนุมัติ", "สถานะ"]
+
+    def news_text(self):
+        co = self.co
+        if not co.gemini.key:
+            return "📰 ฝ่ายข่าวใช้ Gemini ต้องใส่ Gemini key ก่อน (manage.sh ข้อ 20)"
+        n = co.acct.get("news") or {}
+        if not n.get("t"):
+            return "📰 ยังไม่มีผลสแกนข่าว รอรอบสแกนตลาดถัดไป (สแกนทุก ~3 ชม.)", ["ประชุม", "สถานะ"]
+        import time as _t
+        out = ["📰 ข่าวคริปโตล่าสุด %s (ค้นจาก Google)" % n["t"][11:16],
+               "บรรยากาศ: %s · ความเสี่ยง: %s" % (n.get("mood") or "-", n.get("risk") or "-")]
+        if n.get("summary"):
+            out.append(n["summary"])
+        if n.get("events"):
+            out.append("\n🗓 เหตุการณ์ที่ต้องจับตา:")
+            out += ["• " + e for e in n["events"]]
+        bl = co.gemini.blocked()
+        if bl:
+            out.append("\n⛔ งดซื้อเพราะข่าวร้าย:")
+            out += ["• %s – %s (อีก %d ชม.)" % (s.replace(co.ex.quote, ""), v["reason"], max(1, (v["until"] - _t.time()) // 3600))
+                    for s, v in bl.items()]
+        if n.get("good"):
+            out.append("\n✅ ข่าวดี:")
+            out += ["• %s – %s" % (g["symbol"].replace(co.ex.quote, ""), g["reason"]) for g in n["good"]]
+        _, lim, _ = co.gemini.budget_status()
+        out.append("\nงบ Gemini เดือนนี้ใช้ไป %.0f%%" % (co.gemini.month_frac() * 100))
+        return "\n".join(out)[:4800], ["ประชุม", "ไม่อนุมัติ", "สถานะ"]
 
     def rejections_text(self):
         rows = self.co.acct.recent_decisions(15, only_rejected=True)
