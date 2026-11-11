@@ -393,7 +393,7 @@ class LineBot:
         pos = co.acct.open_positions()
         if not pos:
             return "ยังไม่มีไม้ที่ถืออยู่"
-        px = co.ex.prices([p["symbol"] for p in pos])
+        px = co.prices([p["symbol"] for p in pos], 15)
         lines = ["📈 ไม้ที่ถืออยู่"]
         for p in pos:
             now = px.get(p["symbol"], p["entry"])

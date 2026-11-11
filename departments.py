@@ -1200,9 +1200,24 @@ class ExecutionDept:
             return new
         return None
 
+    busy = 0          # จำนวนคำสั่งซื้อ/ขายที่กำลังส่ง
+    exit_cb = None    # ถูกสั่งปิดระหว่างส่งคำสั่ง: ทำให้จบก่อนแล้วค่อยปิด
+
+    def _enter(self):
+        self.busy += 1
+
+    def _leave(self):
+        self.busy -= 1
+        if self.busy <= 0 and self.exit_cb:
+            self.exit_cb()
+
     def buy(self, o, risk):
         with self.lock:
-            return self._buy(o, risk)
+            self._enter()
+            try:
+                return self._buy(o, risk)
+            finally:
+                self._leave()
 
     def _buy(self, o, risk):
         s = o["symbol"]
@@ -1293,7 +1308,11 @@ class ExecutionDept:
         with self.lock:
             if not self.acct._one("SELECT 1 FROM positions WHERE id=? AND status='open'", (p["id"],)):
                 return  # อีก thread ขายไปแล้ว
-            self._sell(p, reason)
+            self._enter()
+            try:
+                self._sell(p, reason)
+            finally:
+                self._leave()
 
     def _sell(self, p, reason):
         if p["oco_id"]:

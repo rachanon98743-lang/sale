@@ -162,10 +162,24 @@ class Binance:
 
     def prices(self, symbols=None):
         if self.th:
-            out = {}
-            for sym in (symbols or list(self.filters)):
-                d = self.public("/api/v3/ticker/24hr", {"symbol": sym})
-                out[sym] = float(d["lastPrice"])
+            # ถามพร้อมกัน + ลองใหม่ 1 ครั้ง: เน็ตสะดุดเหรียญเดียวไม่ทำให้ราคาเหรียญอื่นหายทั้งชุด
+            # (ตัวเฝ้า stop จะข้ามเฉพาะเหรียญที่ไม่ได้ราคา แล้วลองใหม่ใน 10 วินาที) ถ้าไม่ได้สักตัวค่อยแจ้ง error
+            from concurrent.futures import ThreadPoolExecutor
+            syms = list(symbols or self.filters)
+
+            def one(sym):
+                for attempt in range(2):
+                    try:
+                        return sym, float(self.public("/api/v3/ticker/24hr", {"symbol": sym})["lastPrice"])
+                    except Exception as e:
+                        err = e
+                        time.sleep(0.3)
+                return sym, err
+            with ThreadPoolExecutor(max_workers=min(8, max(1, len(syms)))) as pool:
+                got = list(pool.map(one, syms))
+            out = {s_: v for s_, v in got if isinstance(v, float)}
+            if syms and not out:
+                raise got[0][1] if isinstance(got[0][1], Exception) else BinanceError("ดึงราคาไม่ได้")
             return out
         if symbols:
             data = self.public("/api/v3/ticker/price", {"symbols": json.dumps(list(symbols), separators=(",", ":"))})

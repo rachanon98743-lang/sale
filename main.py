@@ -646,9 +646,19 @@ def main():
     print("แดชบอร์ด: http://localhost:%d" % a.port)
 
     def stop(*_):  # systemctl stop/restart = ปิดแบบตั้งใจ ไม่ต้องแจ้งว่าดับ
-        co.save_paper()
-        co.heartbeat(clean=True)
-        os._exit(0)
+        # รอให้คำสั่งซื้อ/ขายที่กำลังส่งอยู่ทำจนจบและลงบัญชีก่อน (สำคัญกับอัปเดตอัตโนมัติที่รีสตาร์ทบ่อย)
+        # ไม่งั้นอาจซื้อบนกระดานแล้วแต่ยังไม่ได้บันทึกไม้ = บอทไม่เฝ้า stop ให้
+        def bye():
+            try:
+                co.save_paper()
+                co.heartbeat(clean=True)
+            finally:
+                os._exit(0)
+        if co.exe.busy > 0:
+            co.exe.exit_cb = bye                   # กำลังส่งคำสั่งอยู่ (thread ไหนก็ได้): ปิดทันทีที่ทำเสร็จ
+            threading.Timer(30, bye).start()       # กันค้าง: อย่างช้า 30 วินาทีปิดแน่นอน
+            return
+        bye()
     signal.signal(signal.SIGTERM, stop)
     try:
         co.run_forever()
