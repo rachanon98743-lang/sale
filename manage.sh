@@ -49,7 +49,7 @@ while true; do
   echo " 8) เปลี่ยนรหัสผ่านแดชบอร์ด"
   echo " 9) ตรวจการเชื่อมต่อ Webull และยอดเงิน (ไม่ซื้อขาย)"
   echo "10) ให้ Webull ตรวจคำสั่งซื้อทดลอง SPY \$5 (preview ไม่ซื้อจริง)"
-  echo "11) ตั้งแจ้งเตือนเข้า LINE (ถ้ายังไม่ได้ใช้ของบอทคริปโต)"
+  echo "11) ตั้ง/เปลี่ยน LINE ของบอทหุ้น (แยกจากบอทคริปโต)"
   echo "12) ส่งข้อความทดสอบเข้า LINE"
   echo "13) ตั้งเพดานทุนเงินจริง (USD)"
   echo "14) ตั้งแจ้งเตือนเมื่อ VPS ดับ (healthchecks.io)"
@@ -116,10 +116,24 @@ while true; do
         echo "รหัสหน้าเว็บตอนนี้: $p"; systemctl restart stockscan 2>/dev/null; pw_test "$p" ;;
     9) run --check ;;
     10) run --check-order ;;
-    11) read -r -p "Channel access token (long-lived): " t; read -r -p "Your user ID (ขึ้นต้นด้วย U): " u
-        [ -n "$t" ] && [ -n "$u" ] || { echo "ยกเลิก"; continue; }
-        setvar LINE_CHANNEL_ACCESS_TOKEN "$t"; setvar LINE_USER_ID "$u"; run --test-line
-        systemctl restart $SVC_NAME ;;
+    11) CUR=$(grep '^LINE_CHANNEL_ACCESS_TOKEN=' "$ENV" | cut -d= -f2-)
+        CRY=$(grep '^LINE_CHANNEL_ACCESS_TOKEN=' /root/bot.env 2>/dev/null | cut -d= -f2-)
+        if [ -z "$CUR" ]; then echo "ตอนนี้: ยังไม่ได้ตั้ง LINE"
+        elif [ "$CUR" = "$CRY" ]; then echo "ตอนนี้: ใช้ LINE ตัวเดียวกับบอทคริปโต (...${CUR: -4})"
+        else echo "ตอนนี้: ใช้ LINE แยกของบอทหุ้นแล้ว (...${CUR: -4})"; fi
+        echo "ใส่ LINE OA ของบอทหุ้น (แยกจากบอทคริปโต ไม่กระทบบอทคริปโต)"
+        echo "token: https://developers.line.biz/console/ → channel หุ้น → Messaging API → Channel access token → Issue"
+        echo "user ID: แท็บ Basic settings → Your user ID (ขึ้นต้นด้วย U)"
+        read -r -p "Channel access token: " t; t=$(echo "$t" | tr -d '[:space:]')
+        read -r -p "Your user ID: " u; u=$(echo "$u" | tr -d '[:space:]')
+        [ -n "$t" ] && [ -n "$u" ] || { echo "ยกเลิก ไม่ได้เปลี่ยน"; continue; }
+        case "$u" in U*) ;; *) echo "❌ user ID ต้องขึ้นต้นด้วย U ไม่ได้บันทึก"; continue ;; esac
+        [ "$t" = "$CRY" ] && echo "⚠️ token นี้เป็นตัวเดียวกับบอทคริปโต (ยังไม่แยก)"
+        setvar LINE_CHANNEL_ACCESS_TOKEN "$t"; setvar LINE_USER_ID "$u"
+        cfgset line_monthly_limit 280
+        run --test-line
+        systemctl restart $SVC_NAME; systemctl restart stockscan 2>/dev/null
+        echo "✅ บอทหุ้น + ฝ่ายสแกนหุ้น ส่งเข้า LINE ตัวใหม่แล้ว (โควตาแยก 280/เดือน)" ;;
     12) run --test-line ;;
     13) read -r -p "เพดานทุน (USD): " cap; cfgset max_capital_usd "$cap"; systemctl restart $SVC_NAME; echo "บันทึกแล้ว" ;;
     14) read -r -p "Ping URL (https://hc-ping.com/...): " u
