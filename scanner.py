@@ -9,6 +9,8 @@ scanner.py — ฝ่ายสแกนหุ้นมืออาชีพ + Ge
        🌱 ถือยาว เน้นเติบโต : รายได้โต กำไรดี ราคายังขาขึ้น → โซนสะสม, เป้าราคา, จุดเลิกถือ
        💰 ถือยาว เน้นปันผล : ปันผลสูง จ่ายสม่ำเสมอ ไม่จ่ายเกินกำไร → โซนสะสม, ปันผลที่จะได้, จุดเลิกถือ
   3) ส่งตัวที่ผ่านเกณฑ์ให้ Gemini (ค้นข่าวล่าสุดด้วย Google Search) ตัดสินแบบผู้จัดการกองทุน: ซื้อ / รอ / ไม่ควรแตะ
+     แล้วให้ Claude (ค้นข่าวด้วย web search ของตัวเอง) เป็นคณะกรรมการความเสี่ยงตรวจซ้ำอีกชั้น
+     ซื้อได้ก็ต่อเมื่อ AI ที่ทำงานรอบนั้นไม่มีตัวไหนค้าน (ตัวไหนบอก avoid = ไม่ซื้อ, ไม่ตรงกัน = รอ)
   4) ส่งสรุปเข้า LINE วันละ 1 ข้อความ (หลังตลาด US ปิด) + เปิดหน้าเว็บดูละเอียดที่พอร์ต 8082
   5) ติดตามตัวที่เคยแนะนำ: เข้าโซนซื้อ / ถึงเป้าขาย / หลุดจุดตัดขาดทุน แจ้งในข้อความวันถัดไป + เก็บสถิติอัตราชนะ
 
@@ -67,6 +69,10 @@ DEFAULT = {
     "gemini_max_calls_day": 8,
     "gemini_max_candidates": 18,
     "manual_scan_cooldown_min": 20,
+    "claude": True,
+    "claude_model": "claude-sonnet-5-5",
+    "claude_max_calls_day": 2,
+    "claude_max_searches": 6,       # จำนวนครั้งค้นเว็บต่อรอบ (Anthropic คิดเพิ่มต่อครั้ง)
 }
 
 _lock = threading.Lock()
@@ -338,6 +344,32 @@ def dividend_pick(s, x, f, cfg, sector):
 
 
 # ===================================================================== Gemini
+def ai_rows(cands):
+    """ข้อมูลของแต่ละตัวที่ส่งให้ AI ตรวจ (ชุดเดียวกันทั้ง Gemini และ Claude)"""
+    rows = []
+    for c in cands:
+        x, f, p = c["x"], c["f"], c["pick"]
+        row = {"symbol": c["symbol"], "name": f.get("shortName"), "sector": f.get("sector") or c["sector"],
+               "category": p["cat"], "setup": p["kind"], "price": r2(x["close"]), "buy_zone": p["zone"],
+               "rsi": round(x["rsi"]), "ret_6m_pct": round(x["ret126"], 1), "rel_strength_vs_spy_6m": round(x["rs"], 1),
+               "pct_from_52w_high": round((x["close"] / x["hi52"] - 1) * 100, 1)}
+        for k in ("stop", "t1", "t2", "target", "review", "yield_pct", "payout_pct"):
+            if p.get(k) is not None:
+                row[k] = p[k]
+        for k, n in (("revenueGrowth", "rev_growth"), ("earningsGrowth", "eps_growth"),
+                     ("profitMargins", "net_margin"), ("returnOnEquity", "roe")):
+            if num(f.get(k)) is not None:
+                row[n] = round(num(f.get(k)) * 100, 1)
+        for k in ("forwardPE", "targetMeanPrice", "recommendationKey"):
+            if f.get(k) is not None:
+                row[k] = round(f[k], 1) if isinstance(f[k], float) else f[k]
+        dd, ed = next_earnings_days(f)
+        if ed:
+            row["next_earnings"] = "%s (อีก %d วัน)" % (ed, dd)
+        rows.append(row)
+    return rows
+
+
 class Gemini:
     URL = "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent"
     FALLBACK = ("gemini-flash-latest", "gemini-2.5-flash", "gemini-2.5-flash-lite")
@@ -403,27 +435,10 @@ class Gemini:
         return json.loads(t[t.index("{"):t.rindex("}") + 1])
 
     def review(self, cands, regime, date):
-        rows = []
-        for c in cands:
-            x, f, p = c["x"], c["f"], c["pick"]
-            row = {"symbol": c["symbol"], "name": f.get("shortName"), "sector": f.get("sector") or c["sector"],
-                   "category": p["cat"], "setup": p["kind"], "price": r2(x["close"]), "buy_zone": p["zone"],
-                   "rsi": round(x["rsi"]), "ret_6m_pct": round(x["ret126"], 1), "rel_strength_vs_spy_6m": round(x["rs"], 1),
-                   "pct_from_52w_high": round((x["close"] / x["hi52"] - 1) * 100, 1)}
-            for k in ("stop", "t1", "t2", "target", "review", "yield_pct", "payout_pct"):
-                if p.get(k) is not None:
-                    row[k] = p[k]
-            for k, n in (("revenueGrowth", "rev_growth"), ("earningsGrowth", "eps_growth"),
-                         ("profitMargins", "net_margin"), ("returnOnEquity", "roe")):
-                if num(f.get(k)) is not None:
-                    row[n] = round(num(f.get(k)) * 100, 1)
-            for k in ("forwardPE", "targetMeanPrice", "recommendationKey"):
-                if f.get(k) is not None:
-                    row[k] = round(f[k], 1) if isinstance(f[k], float) else f[k]
-            dd, ed = next_earnings_days(f)
-            if ed:
-                row["next_earnings"] = "%s (อีก %d วัน)" % (ed, dd)
-            rows.append(row)
+        rows = ai_rows(cands)
+        return self._review(rows, regime, date)
+
+    def _review(self, rows, regime, date):
         prompt = (
             "คุณคือผู้จัดการกองทุนหุ้นสหรัฐฯ มืออาชีพ วิเคราะห์ให้นักลงทุนรายย่อยชาวไทยที่ซื้อผ่าน Webull\n"
             "วันที่ข้อมูลปิดตลาดล่าสุด: %s | ภาวะตลาด (SPY): %s | VIX: %s\n\n"
@@ -442,6 +457,93 @@ class Gemini:
         text, model, searched = self.call(prompt)
         out = self.parse(text)
         out["model"] = model + (" + Google Search" if searched else "")
+        return out
+
+
+class Claude:
+    """คณะกรรมการความเสี่ยงชั้นที่ 2: ตรวจตัวที่ระบบ + Gemini คัดมา ค้นข่าวเองด้วย web search ของ Anthropic"""
+    URL = "https://api.anthropic.com/v1/messages"
+    SEARCH_TOOLS = ("web_search_20260209", "web_search_20250305")
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.key = os.environ.get("ANTHROPIC_API_KEY", "")
+
+    @property
+    def enabled(self):
+        return bool(self.key) and bool(self.cfg.get("claude", True))
+
+    def _post(self, body):
+        req = urllib.request.Request(self.URL, data=json.dumps(body).encode(), method="POST", headers={
+            "x-api-key": self.key, "anthropic-version": "2023-06-01", "content-type": "application/json"})
+        with urllib.request.urlopen(req, timeout=300) as r:
+            return json.loads(r.read())
+
+    def call(self, prompt, max_tokens=6000):
+        st = jload(STATE, {})
+        today = now_th().strftime("%Y-%m-%d")
+        c = st.get("claude", {})
+        if c.get("date") != today:
+            c = {"date": today, "calls": 0, "in": 0, "out": 0, "searches": 0}
+        if c["calls"] >= int(self.cfg["claude_max_calls_day"]):
+            raise RuntimeError("ใช้ Claude ครบ %d ครั้งวันนี้แล้ว" % c["calls"])
+        err = None
+        tools = [[{"type": t, "name": "web_search", "max_uses": int(self.cfg["claude_max_searches"])}]
+                 for t in self.SEARCH_TOOLS] + [None]
+        for tl in tools:
+            body = {"model": self.cfg["claude_model"], "max_tokens": max_tokens, "temperature": 0.2,
+                    "messages": [{"role": "user", "content": prompt}]}
+            if tl:
+                body["tools"] = tl
+            try:
+                data = self._post(body)
+            except urllib.error.HTTPError as e:
+                err = "HTTP %s %s" % (e.code, e.read()[:200].decode("utf-8", "ignore"))
+                if e.code == 400 and tl:   # รุ่นนี้ใช้เครื่องมือค้นเว็บแบบนี้ไม่ได้ ลองแบบถัดไป
+                    continue
+                raise RuntimeError(err)
+            us = data.get("usage") or {}
+            c["calls"] += 1
+            c["in"] += int(us.get("input_tokens", 0))
+            c["out"] += int(us.get("output_tokens", 0))
+            c["searches"] += int((us.get("server_tool_use") or {}).get("web_search_requests", 0))
+            st["claude"] = c
+            jsave(STATE, st)
+            texts = [b.get("text", "") for b in data.get("content") or [] if b.get("type") == "text"]
+            text = "\n".join(texts)
+            if "{" not in text:
+                err = "Claude ตอบไม่เป็น JSON (%s)" % data.get("stop_reason")
+                continue
+            return text, data.get("model", self.cfg["claude_model"]), bool(tl)
+        raise RuntimeError(err or "เรียก Claude ไม่ได้")
+
+    def review(self, rows, gemini_out, regime, date):
+        gem = {}
+        for v in (gemini_out or {}).get("stocks") or []:
+            if isinstance(v, dict) and v.get("symbol"):
+                gem[str(v["symbol"]).upper()] = {k: v.get(k) for k in ("verdict", "confidence", "reason", "news", "risk")}
+        for r in rows:
+            if r["symbol"] in gem:
+                r["gemini_view"] = gem[r["symbol"]]
+        prompt = (
+            "คุณคือคณะกรรมการบริหารความเสี่ยงของกองทุนหุ้นสหรัฐฯ (ไม่ใช้เลเวอเรจ ไม่ short) ตรวจรอบสุดท้ายก่อนแนะนำ"
+            "นักลงทุนรายย่อยชาวไทยที่ซื้อผ่าน Webull\n"
+            "วันที่ข้อมูลปิดตลาดล่าสุด: %s | ภาวะตลาด (SPY): %s | VIX: %s\n"
+            "ข้อมูลราคา/งบมาจาก Yahoo Finance; gemini_view = ความเห็นนักวิเคราะห์อีกคน (อาจผิดได้ ห้ามเชื่อตาม)\n\n"
+            "งานของคุณ:\n"
+            "1) ใช้ web search ตรวจข่าวสำคัญ 2 สัปดาห์ล่าสุด เฉพาะตัวที่สงสัย (งบ, guidance, คดี, ลดปันผล, ดาวน์เกรด, ดีลใหญ่)"
+            " ใช้แหล่งน่าเชื่อถือ: เว็บบริษัท/SEC, Reuters, Bloomberg, CNBC, WSJ, MarketWatch, Yahoo Finance\n"
+            "2) ตรวจตัวเลข: จุดตัดขาดทุนต่ำกว่าโซนซื้อจริงไหม, เป้าคุ้มความเสี่ยง (อย่างน้อย 2 เท่า) ไหม, ปันผลจ่ายเกินกำไรไหม,"
+            " valuation แพงเกินไหม\n"
+            "3) ตัดสิน buy / wait / avoid ด้วยมาตรฐานของคุณเอง ถ้าไม่แน่ใจ = wait; trade ที่ประกาศงบภายใน 5 วัน = wait\n"
+            "4) ภาษาไทยเข้าใจง่าย reason ไม่เกิน 160 ตัวอักษร news ไม่เกิน 120 ตัวอักษร ห้ามแต่งข่าว ถ้าไม่เจอให้เว้นว่าง\n"
+            "ตอบเป็น JSON อย่างเดียว ไม่มีข้อความอื่น:\n"
+            '{"market_note":"ภาพรวมตลาด 1-2 ประโยค","stocks":[{"symbol":"","verdict":"buy|wait|avoid",'
+            '"confidence":0-100,"reason":"","news":"","risk":"","source":"ชื่อแหล่งข่าวหลัก"}]}\n\n'
+            "ข้อมูล:\n%s" % (date, regime["label"], regime.get("vix"), json.dumps(rows, ensure_ascii=False)))
+        text, model, searched = self.call(prompt)
+        out = Gemini.parse(text)
+        out["model"] = model + (" + web search" if searched else "")
         return out
 
 
@@ -602,20 +704,47 @@ def _scan(cfg, send_line, reason, t0):
             log("Gemini ใช้ไม่ได้: " + g_err)
     elif not gem.key:
         g_err = "ยังไม่ได้ใส่ GEMINI_API_KEY"
-    verdicts = {}
-    for v in (g_out or {}).get("stocks") or []:
-        if isinstance(v, dict) and v.get("symbol"):
-            verdicts[(str(v["symbol"]).upper(), v.get("category"))] = v
-            verdicts.setdefault((str(v["symbol"]).upper(), None), v)
+    cl = Claude(cfg)
+    c_out, c_err = None, ""
+    if cl.enabled and short:
+        try:
+            c_out = cl.review(ai_rows(short), g_out, regime, bar_date)
+            log("Claude ตรวจ %d ตัวแล้ว (%s)" % (len(short), c_out.get("model")))
+        except Exception as e:
+            c_err = str(e)[:200]
+            log("Claude ใช้ไม่ได้: " + c_err)
+    elif not cl.key:
+        c_err = "ยังไม่ได้ใส่ ANTHROPIC_API_KEY"
+
+    def _index(out):
+        idx = {}
+        for v in (out or {}).get("stocks") or []:
+            if isinstance(v, dict) and v.get("symbol"):
+                idx[(str(v["symbol"]).upper(), v.get("category"))] = v
+                idx.setdefault((str(v["symbol"]).upper(), None), v)
+        return idx
+    verdicts, c_verdicts = _index(g_out), _index(c_out)
+
+    def _vd(v):
+        return v.get("verdict") if v and v.get("verdict") in ("buy", "wait", "avoid") else ("wait" if v else None)
 
     results = []
     for c in short:
         p = c["pick"]
         v = verdicts.get((c["symbol"], p["cat"])) or verdicts.get((c["symbol"], None))
-        if v:
-            verdict = v.get("verdict") if v.get("verdict") in ("buy", "wait", "avoid") else "wait"
+        cv = c_verdicts.get((c["symbol"], p["cat"])) or c_verdicts.get((c["symbol"], None))
+        # AI ที่ทำงานรอบนี้ต้องไม่มีใครค้าน: มีคนบอก avoid = avoid, ทุกคนบอก buy = buy, นอกนั้น = wait
+        votes = [x for x in ((_vd(v) if g_out else None), (_vd(cv) if c_out else None)) if x]
+        if (g_out and not v) or (c_out and not cv):
+            votes.append("wait")   # AI ทำงานแต่ไม่ได้ตอบตัวนี้ = ยังไม่ผ่าน
+        if not votes:
+            verdict = "buy"        # ไม่มี AI ทำงาน = ใช้ผลระบบอย่างเดียว
+        elif "avoid" in votes:
+            verdict = "avoid"
+        elif all(x == "buy" for x in votes):
+            verdict = "buy"
         else:
-            verdict = "buy" if not g_out else "wait"   # Gemini ใช้ไม่ได้ = ใช้ผลระบบอย่างเดียว
+            verdict = "wait"
         if p["cat"] == "trade" and p.get("earnings") and verdict == "buy":
             dd = next_earnings_days(c["f"])[0]
             if dd is not None and dd <= 5:
@@ -627,7 +756,10 @@ def _scan(cfg, send_line, reason, t0):
             "rev_growth": round(num(f.get("revenueGrowth"), 0) * 100, 1) if f.get("revenueGrowth") is not None else None,
             "fpe": r2(num(f.get("forwardPE"))), "verdict": verdict,
             "confidence": (v or {}).get("confidence"), "reason": (v or {}).get("reason", ""),
-            "news": (v or {}).get("news", ""), "risk": (v or {}).get("risk", ""), **p})
+            "news": (v or {}).get("news", ""), "risk": (v or {}).get("risk", ""),
+            "g_verdict": _vd(v), "c_verdict": _vd(cv), "c_confidence": (cv or {}).get("confidence"),
+            "c_reason": (cv or {}).get("reason", ""), "c_news": (cv or {}).get("news", ""),
+            "c_risk": (cv or {}).get("risk", ""), "c_source": (cv or {}).get("source", ""), **p})
     order = {"buy": 0, "wait": 1, "avoid": 2}
     results.sort(key=lambda r: (order[r["verdict"]], -r["score"]))
     final = {}
@@ -660,6 +792,8 @@ def _scan(cfg, send_line, reason, t0):
            "regime": regime, "scanned": len(X), "candidates": len(cands), "reviewed": len(short),
            "gemini": {"on": bool(g_out), "model": (g_out or {}).get("model"), "error": g_err,
                       "market_note": (g_out or {}).get("market_note", "")},
+           "claude": {"on": bool(c_out), "model": (c_out or {}).get("model"), "error": c_err,
+                      "market_note": (c_out or {}).get("market_note", "")},
            "final": final, "results": results, "alerts": alerts,
            "tracking": [p for p in picks if p["status"] in ACTIVE],
            "closed": [p for p in picks if p["status"] == "closed"][-30:],
@@ -685,7 +819,12 @@ def line_text(rep, cfg):
     if g.get("market_note"):
         L.append("🧠 " + g["market_note"])
     elif g.get("error"):
-        L.append("🧠 Gemini ไม่ได้ช่วยรอบนี้ (%s) ใช้ผลระบบอย่างเดียว" % g["error"][:60])
+        L.append("🧠 Gemini ไม่ได้ช่วยรอบนี้ (%s)" % g["error"][:60])
+    c = rep.get("claude") or {}
+    if c.get("market_note"):
+        L.append("🛡️ Claude: " + c["market_note"])
+    elif c.get("error"):
+        L.append("🛡️ Claude ไม่ได้ตรวจรอบนี้ (%s)" % c["error"][:60])
     if rep["alerts"]:
         L += ["", "🔔 ติดตามตัวเดิม"] + ["• " + a for a in rep["alerts"][:8]]
     for cat in ("trade", "growth", "dividend"):
@@ -714,7 +853,9 @@ def line_text(rep, cfg):
             if r.get("earnings"):
                 L.append("   📅 ประกาศงบ " + r["earnings"])
             if r.get("reason"):
-                L.append("   💬 " + r["reason"])
+                L.append("   💬 Gemini: " + r["reason"])
+            if r.get("c_reason"):
+                L.append("   🛡️ Claude: " + r["c_reason"])
     wait = [r["symbol"] for r in rep["results"] if r["verdict"] == "wait"]
     if wait:
         L += ["", "⏳ รอจังหวะ: " + ", ".join(dict.fromkeys(wait))]
@@ -787,9 +928,16 @@ def _card(r):
                     r.get("payout_pct") or "-", money(r["review"])))
     if r.get("earnings"):
         H.append("<div class='muted'>📅 ประกาศงบ %s</div>" % _e(r["earnings"]))
-    for k, ic in (("reason", "💬"), ("news", "📰"), ("risk", "⚠️")):
+    vd = {"buy": "ซื้อ", "wait": "รอ", "avoid": "ไม่แตะ"}
+    if r.get("g_verdict") or r.get("c_verdict"):
+        H.append("<div class='muted'>ผลโหวต: Gemini %s · Claude %s</div>" % (
+            vd.get(r.get("g_verdict"), "-"), vd.get(r.get("c_verdict"), "-")))
+    for k, ic in (("reason", "💬 Gemini:"), ("news", "📰"), ("risk", "⚠️"),
+                  ("c_reason", "🛡️ Claude:"), ("c_news", "📰"), ("c_risk", "⚠️")):
         if r.get(k):
             H.append("<div>%s %s</div>" % (ic, _e(r[k])))
+    if r.get("c_source"):
+        H.append("<div class='muted'>แหล่งข่าว (Claude): %s</div>" % _e(r["c_source"]))
     H.append("</div>")
     return "".join(H)
 
@@ -896,6 +1044,10 @@ def render(rep, msg=""):
     H.append("<div class='card'>🧠 <b>Gemini</b>: %s%s</div>" % (
         _e(g.get("market_note") or ("ไม่ได้ใช้รอบนี้ — " + (g.get("error") or ""))),
         ("<div class='muted'>%s</div>" % _e(g["model"])) if g.get("model") else ""))
+    c = rep.get("claude") or {}
+    H.append("<div class='card'>🛡️ <b>Claude</b> (ตรวจซ้ำ): %s%s</div>" % (
+        _e(c.get("market_note") or ("ไม่ได้ใช้รอบนี้ — " + (c.get("error") or "ยังไม่เคยรัน"))),
+        ("<div class='muted'>%s</div>" % _e(c["model"])) if c.get("model") else ""))
     if rep["alerts"]:
         H.append("<h2>🔔 ติดตามตัวเดิม</h2>" + "".join("<div class='card'>%s</div>" % _e(a) for a in rep["alerts"]))
     H.append("<h2>✅ ตัวที่แนะนำวันนี้</h2>")

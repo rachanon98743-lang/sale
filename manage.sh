@@ -40,7 +40,7 @@ while true; do
   echo
   echo "=== AI Stock Company (Webull) | โหมด: $(mode) | สถานะ: $(systemctl is-active $SVC_NAME) ==="
   echo " 1) ใส่ Webull App Key / App Secret"
-  echo " 2) ใส่ Claude (Anthropic) API key"
+  echo " 2) ใส่ Claude (Anthropic) API key (ใช้ทั้งบอทและฝ่ายสแกนหุ้น)"
   echo " 3) เปลี่ยนโหมด: paper / live"
   echo " 4) เปลี่ยนระดับความเสี่ยง: low / mid / high"
   echo " 5) ดู log ล่าสุด"
@@ -53,7 +53,7 @@ while true; do
   echo "12) ส่งข้อความทดสอบเข้า LINE"
   echo "13) ตั้งเพดานทุนเงินจริง (USD)"
   echo "14) ตั้งแจ้งเตือนเมื่อ VPS ดับ (healthchecks.io)"
-  echo "--- ฝ่ายสแกนหุ้น + Gemini (ไม่ต้องใช้ Webull key) | สถานะ: $(systemctl is-active stockscan 2>/dev/null) ---"
+  echo "--- ฝ่ายสแกนหุ้น + Gemini + Claude (ไม่ต้องใช้ Webull key) | สถานะ: $(systemctl is-active stockscan 2>/dev/null) ---"
   echo "15) สแกนหุ้นเดี๋ยวนี้ + ส่งเข้า LINE"
   echo "16) ดู log ฝ่ายสแกนหุ้น"
   echo "17) ใส่ Gemini API key"
@@ -73,7 +73,7 @@ while true; do
        echo "วิธีวาง: แตะค้างบนจอดำตรงบรรทัดนี้ → Paste (อย่าวางในช่อง Ask AI ด้านล่าง)"
        read -r -p "Anthropic API Key: " k; k=$(echo "$k" | tr -d '[:space:]')
        case "$k" in
-         sk-ant-*) setvar ANTHROPIC_API_KEY "$k"; systemctl restart $SVC_NAME
+         sk-ant-*) setvar ANTHROPIC_API_KEY "$k"; systemctl restart $SVC_NAME; systemctl restart stockscan 2>/dev/null
                    echo "✅ บันทึกแล้ว (${k:0:10}...${k: -4})" ;;
          "") echo "ยกเลิก (ยังไม่ได้วางอะไร)" ;;
          *) echo "❌ ไม่ใช่ API key: key ต้องขึ้นต้นด้วย sk-ant- (ที่วางมาขึ้นต้นด้วย ${k:0:7}) ไม่ได้บันทึก" ;;
