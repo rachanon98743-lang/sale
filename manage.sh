@@ -8,6 +8,16 @@ SVC=/etc/systemd/system/$SVC_NAME.service
 PY="$DIR/venv/bin/python"
 
 setvar(){ touch "$ENV"; chmod 600 "$ENV"; grep -v "^$1=" "$ENV" > "$ENV.tmp" || true; echo "$1=$2" >> "$ENV.tmp"; mv "$ENV.tmp" "$ENV"; chmod 600 "$ENV"; }
+pw_test(){ local code i
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    code=$(curl -s -o /dev/null -w '%{http_code}' --data-urlencode "password=$1" http://127.0.0.1:8082/login 2>/dev/null)
+    [ "$code" != 000 ] && break; sleep 1
+  done
+  case "$code" in
+    303) echo "✅ หน้าสแกนหุ้นรับรหัสนี้แล้ว เข้าได้เลย (กดรีเฟรชก่อน)" ;;
+    000) echo "❌ หน้าสแกนหุ้นยังไม่ทำงาน ดู log ข้อ 16" ;;
+    *) echo "❌ หน้าสแกนหุ้นยังไม่รับรหัสนี้ (code $code) ส่งภาพหน้าจอนี้มาให้ดู" ;;
+  esac; }
 mode(){ grep -o -- '--mode [a-z]*' "$SVC" | awk '{print $2}'; }
 run(){ ( set -a; . "$ENV"; set +a; cd "$DIR" && "$PY" main.py "$@" ); }
 cfgset(){ "$PY" - "$DIR/config.json" "$1" "$2" <<'PY'
@@ -48,6 +58,7 @@ while true; do
   echo "16) ดู log ฝ่ายสแกนหุ้น"
   echo "17) ใส่ Gemini API key"
   echo "18) ตั้งทุน (USD) ให้คำนวณขนาดไม้ / เวลาส่ง LINE"
+  echo "19) ดูรหัสหน้าเว็บตอนนี้ + ทดสอบเข้าระบบ"
   echo "21) อัปเดตอัตโนมัติ: ดูสถานะ / เปิด / ปิด"
   echo " 0) ออก"
   read -r -p "เลือก: " c
@@ -92,7 +103,10 @@ while true; do
        case "$a" in 1) bash "$DIR/auto_update.sh" install ;; 2) bash "$DIR/auto_update.sh" remove ;; esac ;;
     8) read -r -p "รหัสใหม่ (อย่างน้อย 10 ตัว): " p
        [ ${#p} -ge 10 ] || { echo "สั้นเกินไป"; continue; }
-       setvar DASHBOARD_PASSWORD "$p"; systemctl restart $SVC_NAME 2>/dev/null; systemctl restart stockscan 2>/dev/null; echo "เปลี่ยนแล้ว (ใช้ได้ทั้งแดชบอร์ดหุ้นและหน้าสแกนหุ้น)" ;;
+       setvar DASHBOARD_PASSWORD "$p"; systemctl restart $SVC_NAME 2>/dev/null; systemctl restart stockscan 2>/dev/null
+       echo "เปลี่ยนแล้ว กำลังทดสอบเข้าหน้าสแกนหุ้นด้วยรหัสใหม่..."; pw_test "$p" ;;
+    19) p=$(grep '^DASHBOARD_PASSWORD=' "$ENV" | tail -1 | cut -d= -f2-)
+        echo "รหัสหน้าเว็บตอนนี้: $p"; systemctl restart stockscan 2>/dev/null; pw_test "$p" ;;
     9) run --check ;;
     10) run --check-order ;;
     11) read -r -p "Channel access token (long-lived): " t; read -r -p "Your user ID (ขึ้นต้นด้วย U): " u

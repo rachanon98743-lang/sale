@@ -1003,12 +1003,12 @@ p{color:#f85149;min-height:1em}</style></head><body>
 
 
 def serve(cfg):
-    pw = os.environ.get("DASHBOARD_PASSWORD", "")
+    pw = os.environ.get("DASHBOARD_PASSWORD", "").strip()
     if len(pw) < 10:
         log("ไม่เปิดหน้าเว็บ: ต้องตั้ง DASHBOARD_PASSWORD อย่างน้อย 10 ตัว")
         return
     state = {"last_manual": 0, "msg": ""}
-    sessions, fails, lk = {}, {}, threading.Lock()
+    sessions, lk = {}, threading.Lock()
 
     class H(BaseHTTPRequestHandler):
         def log_message(self, *a):
@@ -1054,22 +1054,15 @@ def serve(cfg):
         def do_POST(self):
             ip = self.client_address[0]
             if self.path.startswith("/login"):
-                with lk:
-                    n, t0 = fails.get(ip, (0, time.time()))
-                    if time.time() - t0 > 900:
-                        n, t0 = 0, time.time()
-                if n >= 5:
-                    return self._send(LOGIN_PAGE.replace("%MSG%", "ใส่รหัสผิดหลายครั้ง ล็อกไว้ 15 นาที"))
                 length = min(int(self.headers.get("Content-Length", 0) or 0), 2000)
                 form = urllib.parse.parse_qs(self.rfile.read(length).decode(errors="replace"))
-                if hmac.compare_digest((form.get("password") or [""])[0].encode(), pw.encode()):
+                given = (form.get("password") or [""])[0].strip()
+                if hmac.compare_digest(given.encode(), pw.encode()):
                     tok = secrets.token_urlsafe(32)
                     with lk:
                         sessions[tok] = time.time() + 7 * 24 * 3600
-                        fails.pop(ip, None)
                     return self._go("./", "ssid=%s; HttpOnly; SameSite=Strict; Path=/; Max-Age=%d" % (tok, 7 * 24 * 3600))
-                with lk:
-                    fails[ip] = (n + 1, t0)
+                log("ใส่รหัสหน้าเว็บผิดจาก %s" % ip)
                 time.sleep(1)
                 return self._send(LOGIN_PAGE.replace("%MSG%", "รหัสผ่านไม่ถูกต้อง"))
             if not self._authed():

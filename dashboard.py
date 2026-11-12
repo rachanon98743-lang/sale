@@ -298,18 +298,17 @@ p{color:#f85149;min-height:1em}</style></head><body>
 <input type="password" name="password" placeholder="รหัสผ่าน" autofocus required>
 <button>เข้าสู่ระบบ</button><p>%MSG%</p></form></body></html>"""
 
-MAX_FAILS, LOCK_SECONDS, SESSION_SECONDS = 5, 15 * 60, 7 * 24 * 3600
+SESSION_SECONDS = 7 * 24 * 3600
 
 
 def serve(company, port, host="127.0.0.1"):
-    password = os.environ.get("DASHBOARD_PASSWORD", "")
+    password = os.environ.get("DASHBOARD_PASSWORD", "").strip()
     if host != "127.0.0.1" and len(password) < 10:
         company.log("CEO", "ไม่เปิดแดชบอร์ดสู่เครือข่าย: ต้องตั้ง DASHBOARD_PASSWORD ยาวอย่างน้อย 10 ตัวอักษร")
         host = "127.0.0.1"
     snap = Snapshot(company)
     chart_cache = {}       # (symbol, tf) -> (เวลา, ข้อมูล)
     sessions = {}          # token -> หมดอายุเมื่อไร
-    fails = {}             # ip -> (จำนวนครั้งที่ผิด, เวลาที่เริ่มนับ)
     lock = threading.Lock()
 
     class H(BaseHTTPRequestHandler):
@@ -391,27 +390,18 @@ def serve(company, port, host="127.0.0.1"):
         def do_POST(self):
             ip = self.client_address[0]
             if self.path == "/login":
-                with lock:
-                    n, t0 = fails.get(ip, (0, time.time()))
-                    if time.time() - t0 > LOCK_SECONDS:
-                        n, t0 = 0, time.time()
-                    if n >= MAX_FAILS:
-                        return self._login_page("ใส่รหัสผิดหลายครั้ง ล็อกไว้ 15 นาที")
                 length = min(int(self.headers.get("Content-Length", 0) or 0), 2000)
                 form = urllib.parse.parse_qs(self.rfile.read(length).decode(errors="replace"))
-                given = (form.get("password") or [""])[0]
+                given = (form.get("password") or [""])[0].strip()
                 if password and hmac.compare_digest(given.encode(), password.encode()):
                     tok = secrets.token_urlsafe(32)
                     with lock:
                         sessions[tok] = time.time() + SESSION_SECONDS
-                        fails.pop(ip, None)
                     company.log("CEO", "เข้าสู่ระบบแดชบอร์ดจาก %s" % ip)
                     return self._send(302, "", "text/plain", {
                         "Location": "/",
                         "Set-Cookie": "wsid=%s; HttpOnly; SameSite=Strict; Path=/; Max-Age=%d" % (tok, SESSION_SECONDS)})
-                with lock:
-                    fails[ip] = (n + 1, t0)
-                company.log("CEO", "ใส่รหัสแดชบอร์ดผิดจาก %s (ครั้งที่ %d)" % (ip, n + 1))
+                company.log("CEO", "ใส่รหัสแดชบอร์ดผิดจาก %s" % ip)
                 time.sleep(1)
                 return self._login_page("รหัสผ่านไม่ถูกต้อง")
             if not self._authed():
