@@ -92,7 +92,7 @@ while true; do
        case "$a" in 1) bash "$DIR/auto_update.sh" install ;; 2) bash "$DIR/auto_update.sh" remove ;; esac ;;
     8) read -r -p "รหัสใหม่ (อย่างน้อย 10 ตัว): " p
        [ ${#p} -ge 10 ] || { echo "สั้นเกินไป"; continue; }
-       setvar DASHBOARD_PASSWORD "$p"; systemctl restart $SVC_NAME; echo "เปลี่ยนแล้ว" ;;
+       setvar DASHBOARD_PASSWORD "$p"; systemctl restart $SVC_NAME 2>/dev/null; systemctl restart stockscan 2>/dev/null; echo "เปลี่ยนแล้ว (ใช้ได้ทั้งแดชบอร์ดหุ้นและหน้าสแกนหุ้น)" ;;
     9) run --check ;;
     10) run --check-order ;;
     11) read -r -p "Channel access token (long-lived): " t; read -r -p "Your user ID (ขึ้นต้นด้วย U): " u
