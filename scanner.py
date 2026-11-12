@@ -44,6 +44,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from universe import UNIVERSE, BENCHMARK  # noqa: E402
 from notifier import LineNotifier  # noqa: E402
+try:
+    import pro_desk  # noqa: E402  เครื่องมือจาก day-trader-skill
+except Exception:  # ไฟล์หาย/พัง = สแกนต่อได้ตามเดิม
+    pro_desk = None
 
 TH = timezone(timedelta(hours=7))
 REPORT = os.path.join(HERE, "scan_report.json")
@@ -73,6 +77,14 @@ DEFAULT = {
     "claude_model": "claude-sonnet-5-5",
     "claude_max_calls_day": 2,
     "claude_max_searches": 6,       # จำนวนครั้งค้นเว็บต่อรอบ (Anthropic คิดเพิ่มต่อครั้ง)
+    # โต๊ะเดย์เทรดเดอร์ (pro_desk.py, จาก day-trader-skill)
+    "desk_time_machine": True,      # จำลองแผนเทรดก่อนแนะนำ
+    "tm_days": 20, "tm_paths": 3000,
+    "tm_min_avg_r": 0.0,            # ผลจำลองเฉลี่ยต่ำกว่านี้ (R) = เปลี่ยนจาก ซื้อ เป็น รอ
+    "desk_news": True,              # หัวข่าว Yahoo + SEC 8-K
+    "sec_user_agent": "",           # "ชื่อ อีเมล" ตามที่ SEC กำหนด (ว่าง = ไม่ดึง 8-K)
+    "desk_congress": True,          # รายงานซื้อขายหุ้นของ สส.สหรัฐฯ
+    "congress_days": 45, "congress_max_pdfs": 60,
 }
 
 _lock = threading.Lock()
@@ -366,6 +378,16 @@ def ai_rows(cands):
         dd, ed = next_earnings_days(f)
         if ed:
             row["next_earnings"] = "%s (อีก %d วัน)" % (ed, dd)
+        if c.get("tm"):
+            row["time_machine_sim"] = {k: c["tm"][k] for k in ("p_target", "p_stop", "p_neither", "avg_r", "days")}
+        if c.get("desk_news"):
+            nw = c["desk_news"]
+            row["recent_news"] = {"sec_red_flags": nw["critical"], "tags": nw["tags"],
+                                  "headlines": [h["title"] for h in nw["headlines"]],
+                                  "filings_8k": [x["title"] for x in nw["filings"]]}
+        if c.get("congress"):
+            row["congress_trades_45d"] = [{"member": x["name"], "type": x["type"], "date": x["date"],
+                                           "amount": x["amount"]} for x in c["congress"]]
         rows.append(row)
     return rows
 
@@ -693,6 +715,15 @@ def _scan(cfg, send_line, reason, t0):
     for cat in ("trade", "growth", "dividend"):
         short += by.get(cat, [])[:min(cap // 3, max_n[cat] * 2)]
 
+    desk = {}
+    if pro_desk and short:
+        try:
+            desk = pro_desk.run(short, data, cfg, log)
+            log("โต๊ะเดย์เทรดเดอร์: " + " | ".join(desk.values()))
+        except Exception as e:
+            desk = {"error": str(e)[:200]}
+            log("โต๊ะเดย์เทรดเดอร์ใช้ไม่ได้: " + desk["error"])
+
     gem = Gemini(cfg)
     g_out, g_err = None, ""
     if gem.enabled and short:
@@ -749,6 +780,13 @@ def _scan(cfg, send_line, reason, t0):
             dd = next_earnings_days(c["f"])[0]
             if dd is not None and dd <= 5:
                 verdict = "wait"
+        desk_note = ""
+        nw = c.get("desk_news") or {}
+        if nw.get("critical"):
+            verdict, desk_note = "avoid", "🚨 SEC 8-K: " + ", ".join(nw["critical"]) + " → ไม่แตะ"
+        tm = c.get("tm")
+        if p["cat"] == "trade" and tm and verdict == "buy" and tm["avg_r"] < num(cfg.get("tm_min_avg_r"), 0):
+            verdict, desk_note = "wait", "🎲 Time Machine เสียเปรียบ (%+.2fR) → รอ" % tm["avg_r"]
         f, x = c["f"], c["x"]
         results.append({
             "symbol": c["symbol"], "name": f.get("shortName") or c["symbol"], "sector": c["sector"],
@@ -759,7 +797,8 @@ def _scan(cfg, send_line, reason, t0):
             "news": (v or {}).get("news", ""), "risk": (v or {}).get("risk", ""),
             "g_verdict": _vd(v), "c_verdict": _vd(cv), "c_confidence": (cv or {}).get("confidence"),
             "c_reason": (cv or {}).get("reason", ""), "c_news": (cv or {}).get("news", ""),
-            "c_risk": (cv or {}).get("risk", ""), "c_source": (cv or {}).get("source", ""), **p})
+            "c_risk": (cv or {}).get("risk", ""), "c_source": (cv or {}).get("source", ""),
+            "tm": tm, "desk_news": nw or None, "congress": c.get("congress"), "desk_note": desk_note, **p})
     order = {"buy": 0, "wait": 1, "avoid": 2}
     results.sort(key=lambda r: (order[r["verdict"]], -r["score"]))
     final = {}
@@ -794,7 +833,7 @@ def _scan(cfg, send_line, reason, t0):
                       "market_note": (g_out or {}).get("market_note", "")},
            "claude": {"on": bool(c_out), "model": (c_out or {}).get("model"), "error": c_err,
                       "market_note": (c_out or {}).get("market_note", "")},
-           "final": final, "results": results, "alerts": alerts,
+           "desk": desk, "final": final, "results": results, "alerts": alerts,
            "tracking": [p for p in picks if p["status"] in ACTIVE],
            "closed": [p for p in picks if p["status"] == "closed"][-30:],
            "stats": track_stats(picks), "secs": round(time.time() - t0)}
@@ -852,6 +891,14 @@ def line_text(rep, cfg):
                          % (r["action"], money(r["zone"][0]), money(r["zone"][1]), money(r["review"])))
             if r.get("earnings"):
                 L.append("   📅 ประกาศงบ " + r["earnings"])
+            if r.get("tm"):
+                tm = r["tm"]
+                L.append("   🎲 จำลอง: ถึงเป้า1 %d%% / โดนตัด %d%% · %+.2fR %s" % (
+                    tm["p_target"], tm["p_stop"], tm["avg_r"], tm["verdict_th"]))
+            if r.get("congress") and pro_desk:
+                L.append("   🏛️ สส.สหรัฐฯ: " + pro_desk.congress_text(r["congress"]))
+            if r.get("desk_news") and pro_desk and (r["desk_news"].get("critical") or r["desk_news"].get("tags")):
+                L.append("   📰 " + pro_desk.news_text(r["desk_news"])[:120])
             if r.get("reason"):
                 L.append("   💬 Gemini: " + r["reason"])
             if r.get("c_reason"):
@@ -928,6 +975,30 @@ def _card(r):
                     r.get("payout_pct") or "-", money(r["review"])))
     if r.get("earnings"):
         H.append("<div class='muted'>📅 ประกาศงบ %s</div>" % _e(r["earnings"]))
+    if r.get("desk_note"):
+        H.append("<div class='r'>%s</div>" % _e(r["desk_note"]))
+    if r.get("tm") and pro_desk:
+        tm = r["tm"]
+        H.append("<div>🎲 <b>Time Machine</b> %s<div class='muted'>จำลอง %d เส้นทางจากแท่งรายวันของหุ้นตัวนี้ · ต้องชนะเกิน %d%% ถึงคุ้ม"
+                 "%s%s</div></div>" % (_e(pro_desk.tm_text(tm)), tm["paths"], tm["breakeven_pct"],
+                                       (" · ถึงเป้าเฉลี่ย %d วัน" % tm["median_days"]) if tm.get("median_days") else "",
+                                       (" · ย้อนดูอดีต %d ครั้ง ถึงเป้า %d%% เฉลี่ย %+.2fR" % (
+                                           tm["hist_n"], tm["hist_target"], tm["hist_avg_r"])) if tm.get("hist_n") else ""))
+    nw = r.get("desk_news") or {}
+    if nw and pro_desk:
+        H.append("<div>📰 <b>ข่าว 3 วัน</b> %s" % _e(pro_desk.news_text(nw, headline=False)))
+        for it in nw.get("filings", [])[:2] + nw.get("headlines", [])[:2]:
+            H.append("<div class='muted'>• %s <a href='%s' target='_blank' rel='noopener'>%s</a></div>"
+                     % (_e(it["time"]), _e(it["link"]), _e(it["title"])))
+        H.append("</div>")
+    if r.get("congress") and pro_desk:
+        H.append("<div>🏛️ <b>สส.สหรัฐฯ</b> %s" % _e(pro_desk.congress_text(r["congress"])))
+        for x in r["congress"][:3]:
+            H.append("<div class='muted'>• %s %s %s %s%s</div>" % (
+                _e(x.get("date") or ""), _e(x["name"]), "ซื้อ" if x["type"].startswith("P") else (
+                    "ขาย" if x["type"].startswith("S") else _e(x["type"])), _e(x.get("amount") or ""),
+                " (ออปชัน)" if x.get("option") else ""))
+        H.append("</div>")
     vd = {"buy": "ซื้อ", "wait": "รอ", "avoid": "ไม่แตะ"}
     if r.get("g_verdict") or r.get("c_verdict"):
         H.append("<div class='muted'>ผลโหวต: Gemini %s · Claude %s</div>" % (
@@ -1048,6 +1119,11 @@ def render(rep, msg=""):
     H.append("<div class='card'>🛡️ <b>Claude</b> (ตรวจซ้ำ): %s%s</div>" % (
         _e(c.get("market_note") or ("ไม่ได้ใช้รอบนี้ — " + (c.get("error") or "ยังไม่เคยรัน"))),
         ("<div class='muted'>%s</div>" % _e(c["model"])) if c.get("model") else ""))
+    dk = rep.get("desk") or {}
+    if dk:
+        H.append("<div class='card'>🧰 <b>โต๊ะเดย์เทรดเดอร์</b>%s</div>" % "".join(
+            "<div class='muted'>%s %s</div>" % (ic, _e(dk[k])) for k, ic in (
+                ("time_machine", "🎲"), ("news", "📰"), ("congress", "🏛️"), ("error", "⚠️")) if dk.get(k)))
     if rep["alerts"]:
         H.append("<h2>🔔 ติดตามตัวเดิม</h2>" + "".join("<div class='card'>%s</div>" % _e(a) for a in rep["alerts"]))
     H.append("<h2>✅ ตัวที่แนะนำวันนี้</h2>")
@@ -1116,6 +1192,12 @@ def render(rep, msg=""):
              "<div class='card'><b>💰 ถือยาวเน้นปันผล</b> ปันผล ≥%s%%/ปี, จ่ายสม่ำเสมอ, จ่ายไม่เกิน 85%% ของกำไร, "
              "ราคาไม่พัง · เลิกถือเมื่อหลุดแนวรับ 8%% หรือบริษัทลดปันผล</div>"
              "<div class='card'><b>🧠 Gemini</b> ค้นข่าว 2 สัปดาห์ล่าสุดด้วย Google Search แล้วตัดสิน ซื้อ / รอ / ไม่ควรแตะ</div>"
+             "<div class='card'><b>🧰 โต๊ะเดย์เทรดเดอร์</b> (จาก day-trader-skill)<br>"
+             "🎲 <b>Time Machine</b> จำลองแผนเทรดแต่ละไม้ 3,000 ครั้งจากแท่งรายวันของหุ้นตัวนั้น + ย้อนดูอดีต 2 ปี "
+             "ผลเฉลี่ยติดลบ = เปลี่ยนจาก ซื้อ เป็น รอ<br>"
+             "📰 <b>ข่าว</b> หัวข่าว Yahoo 3 วัน + เอกสาร 8-K ที่ SEC: ล้มละลาย / งบเชื่อถือไม่ได้ / ถูกเตือนถอดตลาด / "
+             "ถูกแฮก / หนี้ถูกเรียกคืน = ไม่แตะทันที<br>"
+             "🏛️ <b>สส.สหรัฐฯ</b> รายงานซื้อขายหุ้นของ สส. 45 วันล่าสุด (ข้อมูลเปิดเผยช้าได้ถึง 45 วัน ใช้ประกอบเท่านั้น)</div>"
              "<div class='muted'>ข้อมูลจาก Yahoo Finance · ไม่ใช่คำแนะนำการลงทุน</div></div>"
              % (c["track_trade_days"], c["min_revenue_growth"], c["min_dividend_yield"]))
 

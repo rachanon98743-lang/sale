@@ -12,3 +12,4 @@ auto_update.log
 .bad_version
 scan_*.json
 scan_*.json.tmp
+congress_pdfs/

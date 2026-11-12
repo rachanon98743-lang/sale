@@ -18,6 +18,12 @@ if [ "${1:-}" != quiet ] || ! "$PY" -c "import yfinance, pandas" 2>/dev/null; th
   "$DIR/venv/bin/pip" install -q --upgrade yfinance pandas >/dev/null 2>&1
 fi
 
+# pdftotext ใช้อ่านรายงานซื้อขายหุ้นของ สส.สหรัฐฯ (โต๊ะเดย์เทรดเดอร์) ไม่มีก็สแกนได้ปกติ
+if ! command -v pdftotext >/dev/null 2>&1; then
+  [ "${1:-}" != quiet ] && echo "ติดตั้ง pdftotext (อ่านรายงาน สส.สหรัฐฯ)..."
+  DEBIAN_FRONTEND=noninteractive timeout 300 apt-get install -y -qq poppler-utils >/dev/null 2>&1 || true
+fi
+
 # ใช้ Gemini key / LINE / รหัสแดชบอร์ด เดียวกับบอทคริปโต ถ้ายังไม่มี
 touch "$ENV"; chmod 600 "$ENV"
 if [ -f "$CRYPTO_ENV" ]; then
