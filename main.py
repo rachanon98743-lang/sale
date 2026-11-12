@@ -118,6 +118,35 @@ class Company:
                 return self.last_eq or 0.0
         return self.last_eq
 
+    def thesis(self, p):
+        """ไม้นี้ยังมีโอกาสไหม (ดูกราฟใหม่ทุก 10 นาที): แนวโน้มใหญ่ + โครงสร้าง + ยังอยู่เหนือแนวรับไหม
+        ใช้บอกเจ้าของเท่านั้น ไม่ได้เลื่อน stop ลง (stop = เส้นที่บอกว่าวิเคราะห์ผิดแล้ว)"""
+        from ta import Chart, HTF, levels_at, structure_at
+        cache = self.__dict__.setdefault("_thesis", {})
+        hit = cache.get(p["symbol"])
+        if hit and time.time() - hit[0] < 600:
+            return hit[1]
+        try:
+            tf = RISK_PROFILES.get(p.get("risk") or self.risk, RISK_PROFILES[self.risk])["tf"]
+            k = self.ex.klines(p["symbol"], tf, 250)
+            hk = self.ex.klines(p["symbol"], HTF.get(tf, "1d"), 120)
+            ch = Chart(k, hk)
+            n = len(ch.c) - 1
+            htf, st = ch.htf_trend(n), structure_at(n, ch.piv_h, ch.piv_l)
+            above50 = ch.e50[n] is not None and ch.c[n] > ch.e50[n]
+            if htf == "up" and st != "down":
+                out = ("ok", "📈 ยังมีโอกาส: แนวโน้มใหญ่ยังขาขึ้น%s ถือรอตามแผน" % ("" if above50 else " (ย่อต่ำกว่า EMA50 ชั่วคราว)"))
+            elif htf == "down" and st == "down":
+                out = ("bad", "⚠️ แนวโน้มเสีย: TF ใหญ่และโครงสร้างเป็นขาลง ถ้าหลุด stop จะขายตามแผน")
+            else:
+                out = ("wait", "🟡 เฝ้าระวัง: แนวโน้ม%s โครงสร้าง%s" % (
+                    {"up": "ใหญ่ขาขึ้น", "down": "ใหญ่ขาลง", "flat": "ใหญ่ออกข้าง"}.get(htf, "ไม่ชัด"),
+                    {"up": "ยังขึ้น", "down": "ลง", "range": "ไซด์เวย์"}.get(st, "")))
+        except Exception as e:
+            out = ("?", "ดูกราฟไม่ได้ตอนนี้ (%s)" % e)
+        cache[p["symbol"]] = (time.time(), out)
+        return out
+
     def forecast(self):
         """คาดการณ์ไม้ที่ถืออยู่จากสถิติตอนเข้าซื้อ (ทดสอบย้อนหลัง) — เป็นการประเมินความน่าจะเป็น ไม่ใช่การรับประกัน"""
         pos = self.acct.open_positions()
@@ -147,7 +176,8 @@ class Company:
             down_total += loss_amt
             rows.append({"symbol": p["symbol"], "now": now, "entry": p["entry"], "sl": p["sl"], "tp": p["tp"],
                          "pnl_now": round(cur, 4), "if_tp": round(win_amt, 4), "if_sl": round(loss_amt, 4),
-                         "p_win": round(pw_now, 3), "expected": round(exp, 4), "bt_trades": m.get("bt_trades")})
+                         "p_win": round(pw_now, 3), "expected": round(exp, 4), "bt_trades": m.get("bt_trades"),
+                         "thesis": self.thesis(p)[1] if cur < 0 else ""})
         return {"positions": rows, "expected": round(exp_total, 4), "best": round(up_total, 4), "worst": round(down_total, 4),
                 "win_rate": tr["win_rate"], "trades": tr["trades"]}
 

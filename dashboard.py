@@ -323,7 +323,7 @@ put('lineHealth',(LN.last_webhook?'<div class="m">รับคำสั่งจ
 const F=D.forecast,q=D.quote;put('fc',F.positions.length?F.positions.map(r=>{const span=r.tp-r.sl||1,x=v=>Math.min(100,Math.max(0,(v-r.sl)/span*100));
  return `<div class="fc"><b>${esc(r.symbol)}</b> <span class="${c(r.pnl_now)}">${r.pnl_now>0?'+':''}${f(r.pnl_now)}</span> <span class="m" style="font-size:12px">ตอนนี้</span>
  <div class="rng"><i class="e" style="left:${x(r.entry)}%"></i><i style="left:${x(r.now)}%"></i></div>
- <div style="font-size:12px;display:flex;justify-content:space-between"><span class="r">SL ${f(r.if_sl)}</span><span>โอกาสถึงเป้า ~${Math.round(r.p_win*100)}% · คาดหวัง <b class="${c(r.expected)}">${r.expected>0?'+':''}${f(r.expected)}</b></span><span class="g">TP +${f(r.if_tp)}</span></div></div>`;}).join('')+
+ <div style="font-size:12px;display:flex;justify-content:space-between"><span class="r">SL ${f(r.if_sl)}</span><span>โอกาสถึงเป้า ~${Math.round(r.p_win*100)}% · คาดหวัง <b class="${c(r.expected)}">${r.expected>0?'+':''}${f(r.expected)}</b></span><span class="g">TP +${f(r.if_tp)}</span></div>${r.thesis?'<div style="font-size:12px;margin-top:4px">'+esc(r.thesis)+'</div>':''}</div>`;}).join('')+
  `<div style="font-size:13px">รวม: คาดหวัง <b class="${c(F.expected)}">${F.expected>0?'+':''}${f(F.expected)} ${esc(q)}</b> · ดีสุด <span class="g">+${f(F.best)}</span> · แย่สุด <span class="r">${f(F.worst)}</span></div>`
  :'<div class="m">ยังไม่มีไม้ที่ถืออยู่ · สถิติที่ผ่านมา ชนะ '+F.win_rate+'% จาก '+F.trades+' ไม้</div>');
 const nowpx=Object.fromEntries(F.positions.map(r=>[r.symbol,r.now]));

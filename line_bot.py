@@ -329,7 +329,8 @@ class LineBot:
         out = ["📐 คาดการณ์ไม้ที่ถือ (ประเมินจากสถิติ ไม่ใช่การรับประกัน)"]
         for r in f["positions"]:
             out.append("\n%s ตอนนี้ %+.2f\n  ถึงเป้า %+.2f · โดนตัด %+.2f\n  โอกาสถึงเป้า ~%.0f%% → คาดหวัง %+.2f" % (
-                r["symbol"], r["pnl_now"], r["if_tp"], r["if_sl"], r["p_win"] * 100, r["expected"]))
+                r["symbol"], r["pnl_now"], r["if_tp"], r["if_sl"], r["p_win"] * 100, r["expected"]) +
+                (("\n  " + r["thesis"]) if r.get("thesis") else ""))
         out.append("\nรวมทุกไม้: คาดหวัง %+.2f %s\nดีสุด (ถึงเป้าหมด) %+.2f · แย่สุด (โดนตัดหมด) %+.2f" % (
             f["expected"], q, f["best"], f["worst"]))
         return "\n".join(out)
