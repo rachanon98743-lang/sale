@@ -656,6 +656,7 @@ def _scan(cfg, send_line, reason, t0):
         jsave(PICKS, picks)
 
     rep = {"time": now_th().strftime("%Y-%m-%d %H:%M"), "bar_date": bar_date, "reason": reason,
+           "spy_ret126": round(spy["ret126"], 2),
            "regime": regime, "scanned": len(X), "candidates": len(cands), "reviewed": len(short),
            "gemini": {"on": bool(g_out), "model": (g_out or {}).get("model"), "error": g_err,
                       "market_note": (g_out or {}).get("market_note", "")},
@@ -749,7 +750,7 @@ border-radius:8px;padding:8px 12px;font-size:14px}.tabs button.on{border-color:#
 .btn{background:#58a6ff;color:#0d1117;border:0;border-radius:8px;padding:10px 14px;font-size:15px;font-weight:600}
 .stat{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}.stat div{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:10px}
 .stat b{display:block;font-size:20px}a{color:#58a6ff}
-table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:6px 4px;border-bottom:1px solid #30363d;text-align:left}"""
+table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:6px 4px;border-bottom:1px solid #30363d;text-align:left}\n.cbtn{float:right;background:#21262d;color:#58a6ff;border:1px solid #30363d;border-radius:8px;padding:4px 10px;font-size:13px}\n.rg button{padding:5px 10px;font-size:13px}"""
 
 
 def _e(s):
@@ -761,9 +762,10 @@ def _card(r):
     tag = {"buy": "ซื้อได้", "wait": "รอจังหวะ", "avoid": "ไม่ควรแตะ"}[r["verdict"]]
     conf = (" %s%%" % r["confidence"]) if r.get("confidence") is not None else ""
     H = ["<div class='card'><span class='sym'>%s</span> <span class='muted'>%s</span>"
-         "<span class='tag %s'>%s%s</span><div class='row'><span>$%s</span><span class='k'>%s</span>"
+         "<span class='tag %s'>%s%s</span><button class='cbtn' onclick=\"openChart('%s')\">📉 กราฟ</button><div class='row'><span>$%s</span><span class='k'>%s</span>"
          "<span class='k'>RSI %s</span><span class='k'>แข็งกว่าตลาด %+.1f%%</span></div>"
-         % (_e(r["symbol"]), _e(r["name"]), r["verdict"], tag, conf, money(r["price"]), _e(r["kind"]), r["rsi"], r["rs"])]
+         % (_e(r["symbol"]), _e(r["name"]), r["verdict"], tag, conf, _e(r["symbol"]), money(r["price"]), _e(r["kind"]),
+            r["rsi"], r["rs"])]
     if cat == "trade":
         buy = ("ตั้งซื้อเมื่อผ่าน $%s" % money(r["zone"][0])) if r["order"] == "buy_stop" \
             else "โซนซื้อ $%s-%s" % (money(r["zone"][0]), money(r["zone"][1]))
@@ -793,7 +795,79 @@ def _card(r):
 
 
 TABS = [("home", "🏠 ภาพรวม"), ("trade", "⚡ เทรด"), ("growth", "🌱 เติบโต"), ("dividend", "💰 ปันผล"),
-        ("track", "📈 ติดตามผล"), ("rules", "📘 เกณฑ์")]
+        ("chart", "📉 กราฟ"), ("track", "📈 ติดตามผล"), ("rules", "📘 เกณฑ์")]
+
+
+CHART_JS = r"""<script>
+let CD=null,CR=130;
+const $=id=>document.getElementById(id);
+function fm(x){return x==null?'-':(x>=1000?x.toLocaleString('en',{maximumFractionDigits:0}):x.toFixed(2))}
+function openChart(s){show('chart');$('csym').value=s;loadChart(s)}
+async function loadChart(s){s=(s||$('csym').value||'').trim().toUpperCase();if(!s)return;
+ $('cinfo').innerHTML='<div class="muted">กำลังโหลดกราฟ '+s+' ...</div>';$('cbox').innerHTML='';
+ try{const r=await fetch('api/chart?s='+encodeURIComponent(s));const d=await r.json();
+  if(d.error){$('cinfo').innerHTML='<div class="card r">'+d.error+'</div>';return}CD=d;drawChart();info()}
+ catch(e){$('cinfo').innerHTML='<div class="card r">โหลดไม่ได้ ลองใหม่</div>'}}
+function setR(n){CR=n;document.querySelectorAll('.rg button').forEach(b=>b.classList.toggle('on',+b.dataset.r==n));if(CD)drawChart()}
+function drawChart(){const D=CD,n=D.c.length,k=Math.min(CR,n),s=n-k,A=D.ahead,box=$('cbox');
+ const W=Math.max(320,box.clientWidth||340),PR=52,H1=280,H2=46,H=H1+H2+22,slots=k+A,cw=(W-PR)/slots;
+ const X=i=>(i-s+.5)*cw;let lo=1e18,hi=-1e18;const take=v=>{if(v!=null&&isFinite(v)){lo=Math.min(lo,v);hi=Math.max(hi,v)}};
+ for(let i=s;i<n;i++){take(D.l[i]);take(D.h[i])}
+ const ch=D.channel;for(let j=0;j<ch.mid.length;j++){if(ch.start+j>=s){take(ch.up[j]);take(ch.dn[j])}}
+ const P=D.plan||{};[P.stop,P.t1,P.t2,P.target,P.review].forEach(v=>{if(v&&v<hi*1.25&&v>lo*.75)take(v)});
+ if(D.forecast)D.forecast.range.forEach(take);
+ const pad=(hi-lo)*.04;lo-=pad;hi+=pad;const Y=v=>8+(hi-v)/(hi-lo)*(H1-16);
+ let g=`<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" id="csvg" style="touch-action:pan-y">
+ <defs><clipPath id="cp"><rect x="0" y="0" width="${W-PR}" height="${H1}"/></clipPath></defs>`;
+ for(let t=0;t<=4;t++){const v=lo+(hi-lo)*t/4,y=Y(v);g+=`<line x1="0" x2="${W-PR}" y1="${y}" y2="${y}" stroke="#21262d"/><text x="${W-PR+4}" y="${y+4}" fill="#8b949e" font-size="10">${fm(v)}</text>`}
+ g+=`<line x1="${X(n-1)+cw/2}" x2="${X(n-1)+cw/2}" y1="0" y2="${H1}" stroke="#30363d" stroke-dasharray="3 3"/><text x="${X(n-1)+cw/2-3}" y="${H1-4}" fill="#8b949e" font-size="10" text-anchor="end">คาดการณ์ ${A} วัน →</text><g clip-path="url(#cp)">`;
+ const cc=ch.slope20_pct>2?'#3fb950':(ch.slope20_pct<-2?'#f85149':'#8b949e');let pu=[],pd=[],pm=[];
+ for(let j=0;j<ch.mid.length;j++){const i=ch.start+j;if(i<s)continue;pu.push([X(i),Y(ch.up[j])]);pd.push([X(i),Y(ch.dn[j])]);pm.push([X(i),Y(ch.mid[j])])}
+ if(pu.length){g+=`<polygon points="${pu.map(p=>p.join(',')).join(' ')} ${pd.slice().reverse().map(p=>p.join(',')).join(' ')}" fill="${cc}" opacity=".07"/>`;
+  [pu,pd].forEach(a=>g+=`<polyline points="${a.map(p=>p.join(',')).join(' ')}" fill="none" stroke="${cc}" stroke-width="1.2" stroke-dasharray="5 3"/>`);
+  g+=`<polyline points="${pm.map(p=>p.join(',')).join(' ')}" fill="none" stroke="${cc}" stroke-width=".8" opacity=".6" stroke-dasharray="2 3"/>`}
+ if(P.zone){const a=Y(Math.max(...P.zone)),b=Y(Math.min(...P.zone));g+=`<rect x="0" width="${W-PR}" y="${a}" height="${Math.max(2,b-a)}" fill="#58a6ff" opacity=".15"/>`}
+ const used=[];const hl=(v,c,t,dash)=>{if(v==null||v<lo||v>hi)return;const y=Y(v);g+=`<line x1="0" x2="${W-PR}" y1="${y}" y2="${y}" stroke="${c}" stroke-width="1" ${dash?'stroke-dasharray="6 4"':''}/>`;
+  if(used.some(u=>Math.abs(u-y)<12))return;used.push(y);const tx=`${t} ${fm(v)}`;
+  g+=`<rect x="2" y="${y-12}" width="${tx.length*5.6+6}" height="12" rx="3" fill="#0d1117" opacity=".85"/><text x="5" y="${y-3}" fill="${c}" font-size="10">${tx}</text>`};
+ hl(P.stop,'#f85149','ตัดขาดทุน');hl(P.review,'#f85149','เลิกถือ');hl(P.t1,'#3fb950','เป้า1');hl(P.t2,'#3fb950','เป้า2');hl(P.target,'#3fb950','เป้า');
+ D.support.slice(0,2).forEach(x=>hl(x.price,'#3fb950aa','รับ',1));D.resistance.slice(0,2).forEach(x=>hl(x.price,'#f85149aa','ต้าน',1));
+ const ml=(arr,c,w)=>{let p=[];for(let i=s;i<n;i++)if(arr[i]!=null)p.push(X(i)+','+Y(arr[i]));g+=`<polyline points="${p.join(' ')}" fill="none" stroke="${c}" stroke-width="${w}"/>`};
+ ml(D.sma200,'#bc8cff',1.5);ml(D.sma50,'#58a6ff',1.3);ml(D.ema20,'#d29922',1.1);
+ for(let i=s;i<n;i++){const o=D.o[i],c=D.c[i],u=c>=o,col=u?'#3fb950':'#f85149',x=X(i);
+  g+=`<line x1="${x}" x2="${x}" y1="${Y(D.h[i])}" y2="${Y(D.l[i])}" stroke="${col}"/>`;
+  const bw=Math.max(1,cw*.65);g+=`<rect x="${x-bw/2}" y="${Y(Math.max(o,c))}" width="${bw}" height="${Math.max(1,Math.abs(Y(o)-Y(c)))}" fill="${col}"/>`}
+ D.lines.forEach(L=>{const c=L.type=='up'?'#3fb950':'#f85149';g+=`<line x1="${X(L.x1)}" y1="${Y(L.y1)}" x2="${X(L.x2)}" y2="${Y(L.y2)}" stroke="${c}" stroke-width="2"/>`});
+ const F=D.forecast;if(F){const x=X(n-1+A),c=F.view=='ขึ้น'?'#3fb950':(F.view=='ลง'?'#f85149':'#d29922');
+  g+=`<line x1="${X(n-1)}" y1="${Y(D.c[n-1])}" x2="${x}" y2="${Y(D.c[n-1]*(1+F.median/100))}" stroke="${c}" stroke-width="2" stroke-dasharray="4 3"/>
+  <rect x="${x-5}" y="${Y(F.range[1])}" width="10" height="${Math.max(2,Y(F.range[0])-Y(F.range[1]))}" fill="${c}" opacity=".35"/>`}
+ g+=`</g><rect x="${W-PR}" y="${Y(D.price)-8}" width="${PR}" height="16" fill="#58a6ff"/><text x="${W-PR+3}" y="${Y(D.price)+4}" fill="#0d1117" font-size="10" font-weight="700">${fm(D.price)}</text>`;
+ let vm=0;for(let i=s;i<n;i++)vm=Math.max(vm,D.v[i]);
+ for(let i=s;i<n;i++){const hh=vm?D.v[i]/vm*H2:0;g+=`<rect x="${X(i)-Math.max(1,cw*.65)/2}" y="${H1+H2-hh}" width="${Math.max(1,cw*.65)}" height="${hh}" fill="${D.c[i]>=D.o[i]?'#3fb95066':'#f8514966'}"/>`}
+ [s,Math.floor((s+n-1)/2),n-1].forEach(i=>g+=`<text x="${Math.min(X(i),W-PR-60)}" y="${H-4}" fill="#8b949e" font-size="10">${D.dates[i]}</text>`);
+ g+='</svg>';box.innerHTML='<div id="ctip" class="muted" style="height:18px">แตะกราฟเพื่อดูราคาแต่ละวัน</div>'+g;
+ const sv=$('csvg');const tip=e=>{const r=sv.getBoundingClientRect(),t=e.touches?e.touches[0]:e,i=Math.round((t.clientX-r.left)/cw-.5)+s;
+  if(i>=s&&i<n)$('ctip').textContent=`${D.dates[i]}  เปิด ${fm(D.o[i])} สูง ${fm(D.h[i])} ต่ำ ${fm(D.l[i])} ปิด ${fm(D.c[i])}`};
+ sv.addEventListener('click',tip);sv.addEventListener('touchmove',tip,{passive:true})}
+function info(){const D=CD,F=D.forecast,ch=D.channel,P=D.plan;let h='';
+ h+=`<div class="card"><span class="sym">${D.symbol}</span> <span class="muted">${D.name}</span><div class="row"><span>$${fm(D.price)}</span><span class="${D.change_pct>=0?'g':'r'}">${D.change_pct>=0?'+':''}${D.change_pct}%</span><span class="k">RSI ${D.rsi}</span><span class="k">ข้อมูล ${D.date}</span></div>
+ <div class="muted" style="margin-top:6px"><span style="color:#d29922">━ EMA20</span> · <span style="color:#58a6ff">━ เส้น 50 วัน</span> · <span style="color:#bc8cff">━ เส้น 200 วัน</span> · <span class="g">━ แนวโน้มขาขึ้น</span> · <span class="r">━ แนวโน้มขาลง</span> · ┅ ช่องแนวโน้ม · <span style="color:#58a6ff">▇ โซนซื้อ</span></div></div>`;
+ if(F){const c=F.view=='ขึ้น'?'g':(F.view=='ลง'?'r':'');
+  h+=`<div class="card"><b>🔮 คาดการณ์ ${D.ahead} วันทำการ (~1 เดือน): <span class="${c}">${F.view=='ไม่ชัด'?'ยังไม่ชัด':'มีแนวโน้ม'+F.view}</span></b>
+  <div class="row"><span>โอกาสขึ้น <b>${F.p_up}%</b></span><span>ค่ากลาง ${F.median>=0?'+':''}${F.median}%</span><span>ช่วงที่น่าจะอยู่ $${fm(F.range[0])}-${fm(F.range[1])}</span></div>
+  <div class="muted">จากสถิติหุ้นตัวนี้ 5 ปี: เคยอยู่${F.basis} ${F.samples} วัน แล้ว ${D.ahead} วันถัดมาขึ้น ${F.p_up}% ของครั้ง · รวมกับความชันของช่องแนวโน้ม · เป็นสถิติ ไม่ใช่การรับประกัน</div></div>`}
+ const pos=ch.pos<-.6?'ใกล้ขอบล่าง'+(ch.slope20_pct>2?' (ในช่องขาขึ้น = จังหวะซื้อที่ดี)':' (อาจเด้ง แต่แนวโน้มยังไม่ขึ้น)'):(ch.pos>.6?'ใกล้ขอบบน (ระวังย่อ อย่าไล่ซื้อ)':(ch.pos<-1.05?'หลุดขอบล่าง (อ่อนแรงผิดปกติ)':'กลางช่อง'));
+ h+=`<div class="card"><b>📐 ช่องแนวโน้ม 60 วัน: <span class="${ch.slope20_pct>2?'g':(ch.slope20_pct<-2?'r':'')}">${ch.label}</span></b><div>ชัน ${ch.slope20_pct>=0?'+':''}${ch.slope20_pct}% ต่อ 20 วัน · ราคาตอนนี้${pos}</div>`;
+ D.lines.forEach(L=>h+=`<div>${L.type=='up'?'🟢':'🔴'} ${L.label} ตอนนี้อยู่ที่ $${fm(L.now)} → ${L.type=='up'?(L.broken?'<span class="r">หลุดแล้ว (สัญญาณอ่อน)</span>':'<span class="g">ยังยืนเหนือเส้น</span>'):(L.broken?'<span class="g">ทะลุขึ้นแล้ว (สัญญาณกลับตัว)</span>':'<span class="r">ยังกดอยู่ใต้เส้น</span>')}</div>`);
+ h+=`<div class="row"><span class="g">แนวรับ: ${D.support.map(x=>'$'+fm(x.price)).join(', ')||'-'}</span><span class="r">แนวต้าน: ${D.resistance.map(x=>'$'+fm(x.price)).join(', ')||'-'}</span></div></div>`;
+ if(P){h+=`<div class="card"><b>📋 แผนจากระบบสแกน (${P.kind})</b><div class="row">`+
+  (P.zone?`<span>โซนซื้อ $${fm(P.zone[0])}-${fm(P.zone[1])}</span>`:'')+(P.stop?`<span class="r">ตัดขาดทุน $${fm(P.stop)}</span>`:'')+(P.t1?`<span class="g">เป้า1 $${fm(P.t1)}</span><span class="g">เป้า2 $${fm(P.t2)}</span>`:'')+
+  (P.target?`<span class="g">เป้า $${fm(P.target)}</span>`:'')+(P.review?`<span class="r">เลิกถือถ้าต่ำกว่า $${fm(P.review)}</span>`:'')+`</div>${P.reason?'<div>💬 '+P.reason+'</div>':''}</div>`}
+ h+=`<div class="card"><b>✅ เช็กลิสต์มืออาชีพ ผ่าน ${D.score}</b>`+D.checklist.map(x=>`<div style="margin-top:4px">${x.ok?'✅':'❌'} ${x.label} <span class="muted">${x.detail}</span></div>`).join('')+'</div>';
+ $('cinfo').innerHTML=h}
+addEventListener('resize',()=>{if(CD)drawChart()});
+</script>
+"""
 
 
 def render(rep, msg=""):
@@ -842,6 +916,18 @@ def render(rep, msg=""):
         H.append("".join(_card(r) for r in rows) or "<div class='muted'>ไม่มีตัวที่เข้าเกณฑ์วันนี้</div>")
         H.append("</div>")
 
+    # ---- กราฟ
+    chips = list(dict.fromkeys([r["symbol"] for v in fin.values() for r in v] + [p["symbol"] for p in rep["tracking"]]))
+    H.append("<div class='sec' id='chart'><h2>📉 กราฟ + วิเคราะห์แนวโน้ม</h2><div style='display:flex;gap:6px'>"
+             "<input id='csym' placeholder='ชื่อหุ้น เช่น NVDA' autocapitalize='characters' "
+             "style='flex:1;padding:10px;border-radius:8px;border:1px solid #30363d;background:#0d1117;color:#e6edf3;font-size:16px'"
+             " onkeydown=\"if(event.key=='Enter')loadChart()\"><button class='btn' onclick='loadChart()'>ดู</button></div>"
+             "<div class='tabs' style='margin-top:8px'>%s</div>"
+             "<div class='tabs rg' style='margin-top:8px'><button data-r='66' onclick='setR(66)'>3 เดือน</button>"
+             "<button data-r='130' class='on' onclick='setR(130)'>6 เดือน</button><button data-r='260' onclick='setR(260)'>1 ปี</button></div>"
+             "<div id='cbox' style='margin-top:6px'></div><div id='cinfo'><div class='muted'>เลือกหุ้นด้านบน หรือกดปุ่ม 📉 กราฟ ในการ์ดหุ้น</div></div></div>"
+             % "".join("<button onclick=\"openChart('%s')\">%s</button>" % (_e(x), _e(x)) for x in chips[:20]))
+
     # ---- ติดตามผล
     H.append("<div class='sec' id='track'><h2>📈 ติดตามผลคำแนะนำ</h2>")
     if st:
@@ -882,12 +968,26 @@ def render(rep, msg=""):
              % (c["track_trade_days"], c["min_revenue_growth"], c["min_dividend_yield"]))
 
     H.append("""<script>
-const b=[...document.querySelectorAll('.tabs button')];
+const b=[...document.querySelectorAll('.top .tabs button')];
 function show(t){b.forEach(x=>x.classList.toggle('on',x.dataset.t==t));
 document.querySelectorAll('.sec').forEach(s=>s.classList.toggle('on',s.id==t));try{localStorage.tab=t}catch(e){}}
 b.forEach(x=>x.onclick=()=>show(x.dataset.t));let t='home';try{t=localStorage.tab||'home'}catch(e){}show(t);
-</script></body></html>""")
+</script>""" + CHART_JS + "</body></html>")
     return "".join(H)
+
+
+def chart_json(sym):
+    import chart_analysis
+    sym = (sym or "").upper().strip()
+    rep = jload(REPORT, {}) or {}
+    plan = next((r for r in rep.get("results", []) if r["symbol"] == sym and r["verdict"] != "avoid"), None) \
+        or next((r for r in rep.get("results", []) if r["symbol"] == sym), None)
+    if plan:
+        plan = {k: plan.get(k) for k in ("kind", "zone", "stop", "t1", "t2", "target", "review", "reason")}
+    try:
+        return chart_analysis.analyze(sym, plan, rep.get("regime"), jload(FUND, {}).get(sym), rep.get("spy_ret126"))
+    except Exception as e:
+        return {"error": "ดูกราฟ %s ไม่ได้: %s" % (sym, str(e)[:120])}
 
 
 LOGIN_PAGE = r"""<!DOCTYPE html><html lang="th"><head><meta charset="utf-8">
@@ -943,6 +1043,10 @@ def serve(cfg):
                 return self._send(LOGIN_PAGE.replace("%MSG%", ""))
             if self.path.startswith("/logout"):
                 return self._go("./", "ssid=; Max-Age=0; Path=/")
+            if self.path.startswith("/api/chart"):
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                return self._send(json.dumps(chart_json((qs.get("s") or [""])[0]), ensure_ascii=False),
+                                  "application/json; charset=utf-8")
             if self.path.startswith("/report.json"):
                 return self._send(json.dumps(jload(REPORT, {}), ensure_ascii=False), "application/json")
             self._send(render(jload(REPORT, None), state["msg"]))
