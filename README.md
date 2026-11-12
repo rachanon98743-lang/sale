@@ -47,6 +47,16 @@ curl -fsSL https://raw.githubusercontent.com/rachanon98743-lang/sale/webull-bot/
 ตัวติดตั้งจะ: ติดตั้ง Webull SDK แยกโฟลเดอร์, ใช้ LINE + Claude key เดียวกับบอทคริปโต, ถามรหัสผ่านแดชบอร์ด, ถาม App Key, ตั้ง service `webullbot`
 แดชบอร์ด: `http://<IP Tailscale>:8081` · เมนูจัดการ: `bash /root/webull_trading_company/manage.sh`
 
+## ฝ่ายสแกนหุ้น + Gemini → LINE (ไม่ต้องใช้ Webull API)
+service `stockscan` · หน้าเว็บ `http://<IP Tailscale>:8082` · ไฟล์ `scanner.py`
+- ดึงราคา 2 ปี + งบ/ปันผล/เป้านักวิเคราะห์ จาก Yahoo Finance (ฟรี) ของหุ้นใน universe.py
+- คัด 3 กลุ่ม: ⚡ เทรดเน้นกำไร (ย่อในขาขึ้น/ทะลุฐาน/รอทะลุ) · 🌱 ถือยาวเน้นเติบโต · 💰 ถือยาวเน้นปันผล
+  ทุกตัวมีโซนซื้อ + จุดขาย (เป้า 1-2 / เป้าราคา) + จุดตัดขาดทุน/เลิกถือ
+- Gemini ค้นข่าวด้วย Google Search แล้วตัดสิน ซื้อ / รอ / ไม่ควรแตะ (ใช้ GEMINI_API_KEY เดียวกับบอทคริปโต)
+- ส่ง LINE วันละ 1 ข้อความ อังคาร-เสาร์ 07:40 น. + แจ้งตัวเดิมที่ เข้าโซนซื้อ / ถึงเป้า / หลุด stop + สถิติอัตราชนะ
+- เมนู manage.sh: 15 สแกน+ส่งเดี๋ยวนี้ · 16 log · 17 ใส่ Gemini key · 18 ทุน/เวลาส่ง
+- ปรับเกณฑ์ใน config.json → `"scanner": {"min_dividend_yield": 2.5, "min_revenue_growth": 12, "max_trade": 4, ...}`
+
 ## ขั้นตอนก่อนใช้เงินจริง
 1. **ขอ API key**: webull.co.th/en/open-api → Get API Key → ได้ App Key + App Secret (อย่าส่งให้ใครในแชท)
 2. manage.sh ข้อ 1 ใส่ key → ครั้งแรก**เปิดแอป Webull กดยืนยันการเข้าสู่ระบบ** (2FA)

@@ -40,7 +40,7 @@ if ! grep -q '^DASHBOARD_PASSWORD=' "$ENV"; then
   [ "${GEN:-0}" = 1 ] && printf "\n\033[1;33mรหัสผ่านแดชบอร์ดหุ้นของคุณคือ: %s\nจดเก็บไว้ตอนนี้เลย\033[0m\n" "$PW"
 fi
 if [ -f "$CRYPTO_ENV" ]; then  # ส่งแจ้งเตือนเข้า LINE OA เดิม และใช้ Claude key เดิม
-  for k in LINE_CHANNEL_ACCESS_TOKEN LINE_USER_ID ANTHROPIC_API_KEY; do
+  for k in LINE_CHANNEL_ACCESS_TOKEN LINE_USER_ID ANTHROPIC_API_KEY GEMINI_API_KEY; do
     v=$(grep "^$k=" "$CRYPTO_ENV" | head -1 | cut -d= -f2- || true)
     [ -n "$v" ] && ! grep -q "^$k=" "$ENV" && setvar "$k" "$v" && echo "ใช้ $k เดียวกับบอทคริปโต"
   done
@@ -77,8 +77,15 @@ RestartSec=30
 WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
-systemctl enable -q $SVC_NAME
-if grep -q '^WEBULL_APP_KEY=' "$ENV"; then systemctl restart $SVC_NAME; else echo "ยังไม่มี key: บอทจะเริ่มหลังใส่ key ที่ manage.sh ข้อ 1"; fi
+if grep -q '^WEBULL_APP_KEY=.' "$ENV"; then
+  systemctl enable -q $SVC_NAME; systemctl restart $SVC_NAME
+else
+  systemctl disable -q $SVC_NAME 2>/dev/null || true
+  echo "ยังไม่มี Webull key: บอทเทรดยังไม่เริ่ม (ใส่ key ได้ที่ manage.sh ข้อ 1) — ฝ่ายสแกนหุ้นใช้งานได้เลย"
+fi
+# ฝ่ายสแกนหุ้น + Gemini + LINE (ไม่ต้องใช้ Webull key)
+bash "$DIR/scanner_setup.sh" quiet
+systemctl restart stockscan
 # อัปเดตเองจาก GitHub ทุก 5 นาที (ไม่ต้องกดเมนู 7)
 [ -f "$DIR/.no_autoupdate" ] || bash "$DIR/auto_update.sh" install
 
@@ -86,6 +93,7 @@ say "7/7 เปิดพอร์ตแดชบอร์ดให้เฉพ�
 command -v tailscale >/dev/null || curl -fsSL https://tailscale.com/install.sh | sh >/dev/null
 ufw allow OpenSSH >/dev/null
 ufw allow in on tailscale0 to any port $PORT >/dev/null
+ufw allow in on tailscale0 to any port 8082 >/dev/null
 ufw --force enable >/dev/null
 tailscale ip -4 >/dev/null 2>&1 || tailscale up
 IP=$(tailscale ip -4 | head -1)
@@ -94,6 +102,7 @@ cat <<EOF
   ✅ ติดตั้งบอทหุ้น Webull แล้ว (โหมด $MODE) แยกจากบอทคริปโต
 
   แดชบอร์ดหุ้น:  http://$IP:$PORT   (บอทคริปโตยังอยู่ที่พอร์ต 8080)
+  สแกนหุ้น+Gemini: http://$IP:8082   (ส่งสรุปเข้า LINE ทุกวันอังคาร-เสาร์ 07:40 น.)
   เมนูจัดการ:    bash $DIR/manage.sh
 
   ครั้งแรกที่บอทต่อ Webull: เปิดแอป Webull บนมือถือแล้วกดยืนยันการเข้าสู่ระบบ (2FA) ที่เด้งขึ้นมา

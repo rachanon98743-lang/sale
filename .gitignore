@@ -10,3 +10,5 @@ venv/
 .no_autoupdate
 auto_update.log
 .bad_version
+scan_*.json
+scan_*.json.tmp

@@ -81,16 +81,24 @@ if ! "$PY" -m py_compile *.py 2>>"$LOG"; then
   log "❌ เวอร์ชัน ${NEW:0:7} มีโค้ดเสีย ย้อนกลับ ${OLD:0:7} (บอทยังทำงานเวอร์ชันเดิม)"
   exit 1
 fi
-[ "$SVC" = webullbot ] && "$DIR/venv/bin/pip" install -q --upgrade webull-openapi-python-sdk >/dev/null 2>&1
+SVCS="$SVC"
+if [ "$SVC" = webullbot ]; then
+  "$DIR/venv/bin/pip" install -q --upgrade webull-openapi-python-sdk >/dev/null 2>&1
+  [ -f "$DIR/scanner_setup.sh" ] && bash "$DIR/scanner_setup.sh" quiet >/dev/null 2>&1
+  # บอทเทรดเปิดได้เมื่อมี Webull key เท่านั้น / ฝ่ายสแกนหุ้นไม่ต้องใช้ key
+  SVCS=""
+  grep -q '^WEBULL_APP_KEY=.' /root/webull.env 2>/dev/null && SVCS="webullbot"
+  systemctl is-enabled -q stockscan 2>/dev/null && SVCS="$SVCS stockscan"
+fi
 
-systemctl restart "$SVC"
+for s in $SVCS; do systemctl restart "$s"; done
 ok=1
-for _ in 1 2; do sleep 30; systemctl is-active -q "$SVC" || { ok=0; break; }; done
+for _ in 1 2; do sleep 30; for s in $SVCS; do systemctl is-active -q "$s" || ok=0; done; [ $ok = 1 ] || break; done
 if [ $ok = 1 ]; then
   log "✅ อัปเดต ${OLD:0:7} → ${NEW:0:7} $(git log -1 --format=%s)"
 else
   git reset -q --hard "$OLD"; restore_cfg
-  systemctl restart "$SVC"
+  for s in $SVCS; do systemctl restart "$s"; done
   echo "$NEW" > "$BAD"
   log "❌ เวอร์ชัน ${NEW:0:7} เปิดไม่ขึ้น ย้อนกลับ ${OLD:0:7} แล้ว"
   exit 1

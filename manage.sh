@@ -43,6 +43,11 @@ while true; do
   echo "12) ส่งข้อความทดสอบเข้า LINE"
   echo "13) ตั้งเพดานทุนเงินจริง (USD)"
   echo "14) ตั้งแจ้งเตือนเมื่อ VPS ดับ (healthchecks.io)"
+  echo "--- ฝ่ายสแกนหุ้น + Gemini (ไม่ต้องใช้ Webull key) | สถานะ: $(systemctl is-active stockscan 2>/dev/null) ---"
+  echo "15) สแกนหุ้นเดี๋ยวนี้ + ส่งเข้า LINE"
+  echo "16) ดู log ฝ่ายสแกนหุ้น"
+  echo "17) ใส่ Gemini API key"
+  echo "18) ตั้งทุน (USD) ให้คำนวณขนาดไม้ / เวลาส่ง LINE"
   echo "21) อัปเดตอัตโนมัติ: ดูสถานะ / เปิด / ปิด"
   echo " 0) ออก"
   read -r -p "เลือก: " c
@@ -99,6 +104,24 @@ while true; do
     14) read -r -p "Ping URL (https://hc-ping.com/...): " u
         case "$u" in https://*) setvar HEALTHCHECK_URL "$u"; systemctl restart $SVC_NAME; echo "บันทึกแล้ว" ;;
           *) echo "ยกเลิก" ;; esac ;;
+    15) [ -f /etc/systemd/system/stockscan.service ] || bash "$DIR/scanner_setup.sh"
+        echo "กำลังสแกน ~1-3 นาที..."; ( set -a; . "$ENV"; set +a; cd "$DIR" && "$PY" scanner.py --once ) ;;
+    16) journalctl -u stockscan -n 40 --no-pager ;;
+    17) echo "ขอฟรี/ดูของเดิมที่ aistudio.google.com → Get API key"
+        read -r -s -p "Gemini API Key (พิมพ์แล้วไม่แสดง): " k; echo
+        [ -n "$k" ] || { echo "ยกเลิก"; continue; }
+        setvar GEMINI_API_KEY "$k"; systemctl restart stockscan; echo "บันทึกแล้ว" ;;
+    18) read -r -p "ทุนที่ใช้เทรดหุ้น (USD, 0 = ไม่คำนวณขนาดไม้): " cap
+        read -r -p "เวลาส่ง LINE (HH:MM เวลาไทย, Enter = 07:40): " tm
+        "$PY" - "$DIR/config.json" "${cap:-0}" "${tm:-07:40}" <<'PY'
+import json,sys
+p,cap,tm=sys.argv[1:4]
+c=json.load(open(p,encoding="utf-8"))
+s=c.setdefault("scanner",{})
+s["account_usd"]=float(cap); s["scan_time_th"]=tm
+json.dump(c,open(p,"w",encoding="utf-8"),ensure_ascii=False,indent=2)
+PY
+        systemctl restart stockscan; echo "บันทึกแล้ว" ;;
     0) exit 0 ;;
   esac
 done
