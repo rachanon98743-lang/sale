@@ -20,9 +20,11 @@ scanner.py — ฝ่ายสแกนหุ้นมืออาชีพ + Ge
 """
 
 import argparse
-import base64
 import hmac
 import html
+import http.cookies
+import secrets
+import urllib.parse
 import json
 import math
 import os
@@ -734,101 +736,170 @@ def _tailscale_url(cfg):
 
 
 # ===================================================================== หน้าเว็บ
-CSS = """body{font-family:-apple-system,'Segoe UI',sans-serif;background:#0f1419;color:#e6e6e6;margin:0;padding:12px;font-size:15px}
-h1{font-size:20px;margin:4px 0}h2{font-size:17px;margin:20px 0 8px;border-bottom:1px solid #2a3340;padding-bottom:4px}
-.card{background:#1a222c;border-radius:10px;padding:10px 12px;margin:8px 0}.muted{color:#8a96a3;font-size:13px}
+CSS = """body{font:15px system-ui,Tahoma,sans-serif;background:#0d1117;color:#e6edf3;margin:0;padding:0 12px 40px}
+h1{font-size:19px;margin:12px 0 4px}h2{font-size:16px;margin:16px 0 8px}
+.top{position:sticky;top:0;background:#0d1117;padding:8px 0;z-index:5;border-bottom:1px solid #30363d}
+.tabs{display:flex;gap:6px;overflow-x:auto;white-space:nowrap}.tabs button{background:#161b22;color:#e6edf3;border:1px solid #30363d;
+border-radius:8px;padding:8px 12px;font-size:14px}.tabs button.on{border-color:#58a6ff;color:#58a6ff}
+.sec{display:none}.sec.on{display:block}
+.card{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:12px;margin:10px 0}.muted{color:#8b949e;font-size:13px}
 .sym{font-weight:700;font-size:17px}.tag{display:inline-block;border-radius:6px;padding:1px 7px;font-size:12px;margin-left:6px}
-.buy{background:#123d24;color:#5fe08f}.wait{background:#3d3412;color:#e0c25f}.avoid{background:#3d1616;color:#ef7a7a}
-.row{display:flex;flex-wrap:wrap;gap:4px 14px;margin-top:4px}.k{color:#8a96a3}.g{color:#5fe08f}.r{color:#ef7a7a}
-button{background:#2f6fed;color:#fff;border:0;border-radius:8px;padding:10px 14px;font-size:15px}
-table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:5px 4px;border-bottom:1px solid #2a3340;text-align:left}"""
+.buy{background:#12361f;color:#3fb950}.wait{background:#3a2f0b;color:#d29922}.avoid{background:#3d1214;color:#f85149}
+.row{display:flex;flex-wrap:wrap;gap:4px 14px;margin-top:6px}.k{color:#8b949e}.g{color:#3fb950}.r{color:#f85149}
+.btn{background:#58a6ff;color:#0d1117;border:0;border-radius:8px;padding:10px 14px;font-size:15px;font-weight:600}
+.stat{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}.stat div{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:10px}
+.stat b{display:block;font-size:20px}a{color:#58a6ff}
+table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:6px 4px;border-bottom:1px solid #30363d;text-align:left}"""
 
 
 def _e(s):
     return html.escape(str(s if s is not None else ""))
 
 
+def _card(r):
+    cat = r["cat"]
+    tag = {"buy": "ซื้อได้", "wait": "รอจังหวะ", "avoid": "ไม่ควรแตะ"}[r["verdict"]]
+    conf = (" %s%%" % r["confidence"]) if r.get("confidence") is not None else ""
+    H = ["<div class='card'><span class='sym'>%s</span> <span class='muted'>%s</span>"
+         "<span class='tag %s'>%s%s</span><div class='row'><span>$%s</span><span class='k'>%s</span>"
+         "<span class='k'>RSI %s</span><span class='k'>แข็งกว่าตลาด %+.1f%%</span></div>"
+         % (_e(r["symbol"]), _e(r["name"]), r["verdict"], tag, conf, money(r["price"]), _e(r["kind"]), r["rsi"], r["rs"])]
+    if cat == "trade":
+        buy = ("ตั้งซื้อเมื่อผ่าน $%s" % money(r["zone"][0])) if r["order"] == "buy_stop" \
+            else "โซนซื้อ $%s-%s" % (money(r["zone"][0]), money(r["zone"][1]))
+        H.append("<div class='row'><span>%s</span><span class='r'>ตัดขาดทุน $%s (-%s%%)</span>"
+                 "<span class='g'>เป้า1 $%s (ขายครึ่ง)</span><span class='g'>เป้า2 $%s</span>%s</div>"
+                 % (buy, money(r["stop"]), r["risk_pct"], money(r["t1"]), money(r["t2"]),
+                    ("<span>ขนาดไม้ ~$%s</span>" % money(r["size_usd"])) if r.get("size_usd") else ""))
+    elif cat == "growth":
+        H.append("<div class='row'><span>%s $%s-%s</span><span class='g'>เป้า $%s</span>"
+                 "<span class='r'>เลิกถือถ้าปิดต่ำกว่า $%s</span><span class='k'>รายได้โต %s%% · Fwd P/E %s</span></div>"
+                 % (_e(r["action"]), money(r["zone"][0]), money(r["zone"][1]), money(r["target"]),
+                    money(r["review"]), r.get("rev_growth"), r.get("fpe") or "-"))
+        if r.get("trim_note"):
+            H.append("<div class='muted'>%s</div>" % _e(r["trim_note"]))
+    else:
+        H.append("<div class='row'><span>ปันผล %s%%/ปี</span><span>%s $%s-%s</span>"
+                 "<span class='k'>จ่ายจากกำไร %s%%</span><span class='r'>เลิกถือถ้าปิดต่ำกว่า $%s หรือลดปันผล</span></div>"
+                 % (r["yield_pct"], _e(r["action"]), money(r["zone"][0]), money(r["zone"][1]),
+                    r.get("payout_pct") or "-", money(r["review"])))
+    if r.get("earnings"):
+        H.append("<div class='muted'>📅 ประกาศงบ %s</div>" % _e(r["earnings"]))
+    for k, ic in (("reason", "💬"), ("news", "📰"), ("risk", "⚠️")):
+        if r.get(k):
+            H.append("<div>%s %s</div>" % (ic, _e(r[k])))
+    H.append("</div>")
+    return "".join(H)
+
+
+TABS = [("home", "🏠 ภาพรวม"), ("trade", "⚡ เทรด"), ("growth", "🌱 เติบโต"), ("dividend", "💰 ปันผล"),
+        ("track", "📈 ติดตามผล"), ("rules", "📘 เกณฑ์")]
+
+
 def render(rep, msg=""):
+    head = ("<!doctype html><html lang='th'><head><meta charset='utf-8'>"
+            "<meta name='viewport' content='width=device-width,initial-scale=1'><title>ฝ่ายสแกนหุ้น US</title>"
+            "<style>%s</style></head><body>" % CSS)
     if not rep:
-        return "<html><body style='font-family:sans-serif'>ยังไม่มีผลสแกน กำลังสแกนรอบแรก รอ 2-3 นาทีแล้วรีเฟรช</body></html>"
+        return head + ("<h1>📊 ฝ่ายสแกนหุ้น US</h1><div class='card'>ยังไม่มีผลสแกน กำลังสแกนรอบแรก "
+                       "รอ 2-3 นาทีแล้วรีเฟรช</div><a href='logout'>ออกจากระบบ</a></body></html>")
     rg, g = rep["regime"], rep["gemini"]
-    H = ["<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>",
-         "<title>สแกนหุ้น US</title><style>%s</style></head><body>" % CSS,
-         "<h1>📊 ฝ่ายสแกนหุ้น US</h1><div class='muted'>สแกนล่าสุด %s (เวลาไทย) · ข้อมูลปิดตลาด %s · %d ตัว · %s</div>"
-         % (_e(rep["time"]), _e(thai_date(rep["bar_date"])), rep["scanned"], _e(rep["reason"])),
-         "<div class='card'>ตลาด: %s %s%s<br>🧠 Gemini: %s</div>" % (
-             rg["icon"], _e(rg["label"]), (" · VIX %.1f" % rg["vix"]) if rg.get("vix") else "",
-             _e(g.get("market_note") or ("ไม่ได้ใช้ — " + (g.get("error") or "")))
-             + ("<div class='muted'>%s</div>" % _e(g["model"]) if g.get("model") else "")),
-         "<form method='post' action='scan'><button>🔄 สแกนใหม่ตอนนี้</button> <span class='muted'>%s</span></form>" % _e(msg)]
+    H = [head, "<div class='top'><div style='display:flex;justify-content:space-between;align-items:center'>"
+         "<h1>📊 ฝ่ายสแกนหุ้น US</h1><a href='logout' class='muted'>ออกจากระบบ</a></div><div class='tabs'>"]
+    H += ["<button data-t='%s'>%s</button>" % (k, n) for k, n in TABS]
+    H.append("</div></div>")
+
+    # ---- ภาพรวม
+    fin = rep["final"]
+    st = rep.get("stats")
+    H.append("<div class='sec' id='home'>")
+    H.append("<div class='muted' style='margin-top:8px'>สแกนล่าสุด %s น. · ข้อมูลปิดตลาด %s · %d ตัว · %s</div>"
+             % (_e(rep["time"]), _e(thai_date(rep["bar_date"])), rep["scanned"], _e(rep["reason"])))
+    H.append("<div class='stat' style='margin-top:10px'><div>ตลาด<b>%s %s</b></div><div>VIX (ความกลัว)<b>%s</b></div>"
+             "<div>แนะนำวันนี้<b>%d ตัว</b></div><div>อัตราชนะไม้เทรด<b>%s</b></div></div>"
+             % (rg["icon"], _e(rg["label"].split(" ·")[0]), rg.get("vix") or "-", sum(len(v) for v in fin.values()),
+                ("%d%% (%d ไม้)" % (st["win_rate"], st["trades"])) if st else "ยังไม่มี"))
+    H.append("<div class='card'>🧠 <b>Gemini</b>: %s%s</div>" % (
+        _e(g.get("market_note") or ("ไม่ได้ใช้รอบนี้ — " + (g.get("error") or ""))),
+        ("<div class='muted'>%s</div>" % _e(g["model"])) if g.get("model") else ""))
     if rep["alerts"]:
         H.append("<h2>🔔 ติดตามตัวเดิม</h2>" + "".join("<div class='card'>%s</div>" % _e(a) for a in rep["alerts"]))
+    H.append("<h2>✅ ตัวที่แนะนำวันนี้</h2>")
+    for cat in ("trade", "growth", "dividend"):
+        ic, name = CAT[cat]
+        rows = fin.get(cat) or []
+        H.append("<div class='card'><b>%s %s</b><div class='row'>%s</div></div>" % (
+            ic, name, " · ".join("<span><b>%s</b> $%s</span>" % (_e(r["symbol"]), money(r["price"])) for r in rows)
+            or "<span class='muted'>วันนี้ไม่มี</span>"))
+    H.append("<form method='post' action='scan' style='margin-top:12px'><button class='btn'>🔄 สแกนใหม่ตอนนี้</button>"
+             " <span class='muted'>%s</span></form></div>" % _e(msg or "สแกนเองไม่ส่ง LINE (LINE ส่งเองทุกเช้า)"))
+
+    # ---- 3 กลุ่ม
     for cat in ("trade", "growth", "dividend"):
         ic, name = CAT[cat]
         rows = [r for r in rep["results"] if r["cat"] == cat]
-        H.append("<h2>%s %s</h2>" % (ic, name))
-        if not rows:
-            H.append("<div class='muted'>ไม่มีตัวที่เข้าเกณฑ์วันนี้</div>")
-        for r in rows:
-            tag = {"buy": "ซื้อได้", "wait": "รอจังหวะ", "avoid": "ไม่ควรแตะ"}[r["verdict"]]
-            conf = (" %s%%" % r["confidence"]) if r.get("confidence") is not None else ""
-            H.append("<div class='card'><span class='sym'>%s</span> <span class='muted'>%s</span>"
-                     "<span class='tag %s'>%s%s</span><div class='row'><span>$%s</span><span class='k'>%s</span>"
-                     "<span class='k'>RSI %s</span><span class='k'>แข็งกว่าตลาด %+.1f%%</span></div>"
-                     % (_e(r["symbol"]), _e(r["name"]), r["verdict"], tag, conf, money(r["price"]), _e(r["kind"]),
-                        r["rsi"], r["rs"]))
-            if cat == "trade":
-                buy = ("ตั้งซื้อเมื่อผ่าน $%s" % money(r["zone"][0])) if r["order"] == "buy_stop" \
-                    else "โซนซื้อ $%s-%s" % (money(r["zone"][0]), money(r["zone"][1]))
-                H.append("<div class='row'><span>%s</span><span class='r'>ตัดขาดทุน $%s (-%s%%)</span>"
-                         "<span class='g'>เป้า1 $%s (ขายครึ่ง)</span><span class='g'>เป้า2 $%s</span>%s</div>"
-                         % (buy, money(r["stop"]), r["risk_pct"], money(r["t1"]), money(r["t2"]),
-                            ("<span>ขนาดไม้ ~$%s</span>" % money(r["size_usd"])) if r.get("size_usd") else ""))
-            elif cat == "growth":
-                H.append("<div class='row'><span>%s $%s-%s</span><span class='g'>เป้า $%s</span>"
-                         "<span class='r'>เลิกถือถ้าปิดต่ำกว่า $%s</span><span class='k'>รายได้โต %s%% · Fwd P/E %s</span></div>"
-                         % (_e(r["action"]), money(r["zone"][0]), money(r["zone"][1]), money(r["target"]),
-                            money(r["review"]), r.get("rev_growth"), r.get("fpe") or "-"))
-                if r.get("trim_note"):
-                    H.append("<div class='muted'>%s</div>" % _e(r["trim_note"]))
-            else:
-                H.append("<div class='row'><span>ปันผล %s%%/ปี</span><span>%s $%s-%s</span>"
-                         "<span class='k'>จ่ายจากกำไร %s%%</span><span class='r'>เลิกถือถ้าปิดต่ำกว่า $%s หรือลดปันผล</span></div>"
-                         % (r["yield_pct"], _e(r["action"]), money(r["zone"][0]), money(r["zone"][1]),
-                            r.get("payout_pct") or "-", money(r["review"])))
-            if r.get("earnings"):
-                H.append("<div class='muted'>📅 ประกาศงบ %s</div>" % _e(r["earnings"]))
-            for k, ic2 in (("reason", "💬"), ("news", "📰"), ("risk", "⚠️")):
-                if r.get(k):
-                    H.append("<div>%s %s</div>" % (ic2, _e(r[k])))
-            H.append("</div>")
-    st = rep.get("stats")
-    H.append("<h2>📈 ติดตามผลคำแนะนำ</h2>")
+        H.append("<div class='sec' id='%s'><h2>%s %s</h2>" % (cat, ic, name))
+        H.append("".join(_card(r) for r in rows) or "<div class='muted'>ไม่มีตัวที่เข้าเกณฑ์วันนี้</div>")
+        H.append("</div>")
+
+    # ---- ติดตามผล
+    H.append("<div class='sec' id='track'><h2>📈 ติดตามผลคำแนะนำ</h2>")
     if st:
-        H.append("<div class='card'>ไม้เทรดที่จบแล้ว %d ไม้ · ชนะ %d%% · เฉลี่ย %+.2f%%/ไม้ · รวม %+.1f%%</div>"
-                 % (st["trades"], st["win_rate"], st["avg_pct"], st["sum_pct"]))
+        H.append("<div class='stat'><div>ไม้เทรดที่จบ<b>%d</b></div><div>ชนะ<b>%d%%</b></div><div>เฉลี่ย/ไม้<b>%+.2f%%</b></div>"
+                 "<div>รวม<b>%+.1f%%</b></div></div>" % (st["trades"], st["win_rate"], st["avg_pct"], st["sum_pct"]))
     TH_ST = {"waiting": "รอเข้าโซน", "open": "ถืออยู่", "t1": "ขายครึ่งแล้ว", "watch": "ถือยาว", "target": "ถึงเป้าแล้ว"}
     if rep["tracking"]:
-        H.append("<table><tr><th>หุ้น</th><th>กลุ่ม</th><th>วันที่</th><th>สถานะ</th><th>แผน</th></tr>")
+        H.append("<div class='card'><table><tr><th>หุ้น</th><th>วันที่</th><th>สถานะ</th><th>แผน</th></tr>")
         for p in rep["tracking"]:
             plan = ("stop %s · เป้า %s/%s" % (money(p["stop"]), money(p["t1"]), money(p["t2"]))) if p["cat"] == "trade" \
                 else "เลิกถือ < %s%s" % (money(p["review"]), (" · เป้า %s" % money(p["target"])) if p.get("target") else "")
-            H.append("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>"
-                     % (_e(p["symbol"]), CAT[p["cat"]][0], _e(thai_date(p["date"])), TH_ST.get(p["status"], p["status"]), _e(plan)))
-        H.append("</table>")
+            H.append("<tr><td>%s %s</td><td>%s</td><td>%s</td><td>%s</td></tr>"
+                     % (CAT[p["cat"]][0], _e(p["symbol"]), _e(thai_date(p["date"])), TH_ST.get(p["status"], p["status"]), _e(plan)))
+        H.append("</table></div>")
+    else:
+        H.append("<div class='muted'>ยังไม่มีตัวที่ติดตาม (เริ่มนับจากข้อความ LINE รอบแรก)</div>")
     if rep["closed"]:
-        H.append("<h2>ไม้ที่จบแล้ว</h2><table><tr><th>หุ้น</th><th>แนะนำ</th><th>จบ</th><th>ผล</th></tr>")
+        H.append("<h2>ไม้ที่จบแล้ว</h2><div class='card'><table><tr><th>หุ้น</th><th>แนะนำ</th><th>จบ</th><th>ผล</th></tr>")
         for p in reversed(rep["closed"]):
             cls = "g" if (p.get("result_pct") or 0) > 0 else "r"
             H.append("<tr><td>%s %s</td><td>%s</td><td>%s</td><td class='%s'>%+.1f%%</td></tr>"
                      % (CAT[p["cat"]][0], _e(p["symbol"]), _e(thai_date(p["date"])), _e(thai_date(p.get("exit_day"))),
                         cls, p.get("result_pct") or 0))
-        H.append("</table>")
-    H.append("<p class='muted'>เกณฑ์: เทรด = แนวโน้มขาขึ้น (ราคา &gt; เส้น 50 &gt; เส้น 200 วัน) + จังหวะย่อ/ทะลุฐาน, เสี่ยงไม่เกิน 10%%/ไม้, "
-             "เป้า 2-3 เท่าของความเสี่ยง · เติบโต = รายได้โต ≥%s%% มีกำไร ราคาเหนือเส้น 200 วัน · ปันผล = ≥%s%%/ปี จ่ายสม่ำเสมอ "
-             "ไม่จ่ายเกินกำไร · ข้อมูลจาก Yahoo Finance · ไม่ใช่คำแนะนำการลงทุน</p></body></html>"
-             % (load_cfg()["min_revenue_growth"], load_cfg()["min_dividend_yield"]))
+        H.append("</table></div>")
+    H.append("</div>")
+
+    # ---- เกณฑ์
+    c = load_cfg()
+    H.append("<div class='sec' id='rules'><h2>📘 เกณฑ์ที่ใช้คัด</h2><div class='card'>"
+             "<b>⚡ เทรดเน้นกำไร</b> ขาขึ้นชัด (ราคา &gt; เส้น 50 &gt; เส้น 200 วัน) + จังหวะย่อ/ทะลุฐาน/รอทะลุ, "
+             "เสี่ยง 2-10%%/ไม้, ขายครึ่งที่เป้า 1 (2 เท่าของความเสี่ยง) ที่เหลือเป้า 2 (3 เท่า), ถือไม่เกิน %d วัน, "
+             "ใกล้ประกาศงบ 5 วัน = รอ</div><div class='card'><b>🌱 ถือยาวเน้นเติบโต</b> รายได้โต ≥%s%%, มีกำไร, "
+             "ราคาเหนือเส้น 200 วัน, ไม่แพงเกิน (Fwd P/E ≤ 80) · เลิกถือเมื่อปิดต่ำกว่าเส้น 200 วัน 3%%</div>"
+             "<div class='card'><b>💰 ถือยาวเน้นปันผล</b> ปันผล ≥%s%%/ปี, จ่ายสม่ำเสมอ, จ่ายไม่เกิน 85%% ของกำไร, "
+             "ราคาไม่พัง · เลิกถือเมื่อหลุดแนวรับ 8%% หรือบริษัทลดปันผล</div>"
+             "<div class='card'><b>🧠 Gemini</b> ค้นข่าว 2 สัปดาห์ล่าสุดด้วย Google Search แล้วตัดสิน ซื้อ / รอ / ไม่ควรแตะ</div>"
+             "<div class='muted'>ข้อมูลจาก Yahoo Finance · ไม่ใช่คำแนะนำการลงทุน</div></div>"
+             % (c["track_trade_days"], c["min_revenue_growth"], c["min_dividend_yield"]))
+
+    H.append("""<script>
+const b=[...document.querySelectorAll('.tabs button')];
+function show(t){b.forEach(x=>x.classList.toggle('on',x.dataset.t==t));
+document.querySelectorAll('.sec').forEach(s=>s.classList.toggle('on',s.id==t));try{localStorage.tab=t}catch(e){}}
+b.forEach(x=>x.onclick=()=>show(x.dataset.t));let t='home';try{t=localStorage.tab||'home'}catch(e){}show(t);
+</script></body></html>""")
     return "".join(H)
+
+
+LOGIN_PAGE = r"""<!DOCTYPE html><html lang="th"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>เข้าสู่ระบบ</title>
+<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0d1117;color:#e6edf3;font:15px system-ui,Tahoma,sans-serif}
+form{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:24px;width:min(320px,90vw)}
+input,button{width:100%;box-sizing:border-box;padding:12px;margin-top:10px;border-radius:8px;font-size:16px}
+input{background:#0d1117;color:#e6edf3;border:1px solid #30363d}button{background:#58a6ff;border:0;font-weight:600}
+p{color:#f85149;min-height:1em}</style></head><body>
+<form method="post" action="login"><h2>📊 ฝ่ายสแกนหุ้น US</h2>
+<input type="password" name="password" placeholder="รหัสผ่าน" autofocus required>
+<button>เข้าสู่ระบบ</button><p>%MSG%</p></form></body></html>"""
 
 
 def serve(cfg):
@@ -837,42 +908,68 @@ def serve(cfg):
         log("ไม่เปิดหน้าเว็บ: ต้องตั้ง DASHBOARD_PASSWORD อย่างน้อย 10 ตัว")
         return
     state = {"last_manual": 0, "msg": ""}
+    sessions, fails, lk = {}, {}, threading.Lock()
 
     class H(BaseHTTPRequestHandler):
         def log_message(self, *a):
             pass
 
-        def _auth(self):
-            a = self.headers.get("Authorization", "")
-            try:
-                ok = a.startswith("Basic ") and hmac.compare_digest(
-                    base64.b64decode(a[6:]).decode("utf-8", "ignore").split(":", 1)[1], pw)
-            except Exception:
-                ok = False
-            if not ok:
-                self.send_response(401)
-                self.send_header("WWW-Authenticate", 'Basic realm="stock scanner"')
-                self.end_headers()
-            return ok
-
-        def _send(self, body, ctype="text/html; charset=utf-8", code=200):
+        def _send(self, body, ctype="text/html; charset=utf-8", code=200, headers=None):
             b = body.encode("utf-8")
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(b)))
+            self.send_header("Cache-Control", "no-store")
+            for k, v in (headers or {}).items():
+                self.send_header(k, v)
             self.end_headers()
             self.wfile.write(b)
 
+        def _go(self, where="./", cookie=None):
+            self._send("", "text/plain", 303, dict({"Location": where}, **({"Set-Cookie": cookie} if cookie else {})))
+
+        def _authed(self):
+            c = http.cookies.SimpleCookie(self.headers.get("Cookie", ""))
+            tok = c["ssid"].value if "ssid" in c else ""
+            with lk:
+                exp = sessions.get(tok)
+                if exp and exp > time.time():
+                    return True
+                sessions.pop(tok, None)
+            return False
+
         def do_GET(self):
-            if not self._auth():
-                return
+            if not self._authed():
+                return self._send(LOGIN_PAGE.replace("%MSG%", ""))
+            if self.path.startswith("/logout"):
+                return self._go("./", "ssid=; Max-Age=0; Path=/")
             if self.path.startswith("/report.json"):
                 return self._send(json.dumps(jload(REPORT, {}), ensure_ascii=False), "application/json")
             self._send(render(jload(REPORT, None), state["msg"]))
 
         def do_POST(self):
-            if not self._auth():
-                return
+            ip = self.client_address[0]
+            if self.path.startswith("/login"):
+                with lk:
+                    n, t0 = fails.get(ip, (0, time.time()))
+                    if time.time() - t0 > 900:
+                        n, t0 = 0, time.time()
+                if n >= 5:
+                    return self._send(LOGIN_PAGE.replace("%MSG%", "ใส่รหัสผิดหลายครั้ง ล็อกไว้ 15 นาที"))
+                length = min(int(self.headers.get("Content-Length", 0) or 0), 2000)
+                form = urllib.parse.parse_qs(self.rfile.read(length).decode(errors="replace"))
+                if hmac.compare_digest((form.get("password") or [""])[0].encode(), pw.encode()):
+                    tok = secrets.token_urlsafe(32)
+                    with lk:
+                        sessions[tok] = time.time() + 7 * 24 * 3600
+                        fails.pop(ip, None)
+                    return self._go("./", "ssid=%s; HttpOnly; SameSite=Strict; Path=/; Max-Age=%d" % (tok, 7 * 24 * 3600))
+                with lk:
+                    fails[ip] = (n + 1, t0)
+                time.sleep(1)
+                return self._send(LOGIN_PAGE.replace("%MSG%", "รหัสผ่านไม่ถูกต้อง"))
+            if not self._authed():
+                return self._go()
             wait = cfg["manual_scan_cooldown_min"] * 60 - (time.time() - state["last_manual"])
             if _lock.locked():
                 state["msg"] = "กำลังสแกนอยู่ รอ 2-3 นาทีแล้วรีเฟรช"
@@ -882,9 +979,7 @@ def serve(cfg):
                 state["last_manual"] = time.time()
                 state["msg"] = "เริ่มสแกนแล้ว รอ 2-3 นาทีแล้วรีเฟรช (ไม่ส่ง LINE)"
                 threading.Thread(target=_safe_scan, args=(load_cfg(), False, "สแกนเองจากหน้าเว็บ"), daemon=True).start()
-            self.send_response(303)
-            self.send_header("Location", "./")
-            self.end_headers()
+            self._go()
 
     srv = ThreadingHTTPServer(("0.0.0.0", int(cfg["port"])), H)
     srv.daemon_threads = True
