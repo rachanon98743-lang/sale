@@ -69,8 +69,15 @@ while true; do
        setvar WEBULL_APP_KEY "$k"; setvar WEBULL_APP_SECRET "$s"
        echo "กำลังทดสอบ... ถ้าแอป Webull เด้งให้ยืนยันการเข้าสู่ระบบ ให้กดยืนยัน"
        run --check; systemctl restart $SVC_NAME; echo "บันทึกแล้ว" ;;
-    2) read -r -s -p "Anthropic API Key: " k; echo; setvar ANTHROPIC_API_KEY "$k"
-       systemctl restart $SVC_NAME; echo "บันทึกแล้ว" ;;
+    2) echo "ขอได้ที่ console.anthropic.com → API Keys → Create Key (ขึ้นต้นด้วย sk-ant-)"
+       echo "วิธีวาง: แตะค้างบนจอดำตรงบรรทัดนี้ → Paste (อย่าวางในช่อง Ask AI ด้านล่าง)"
+       read -r -p "Anthropic API Key: " k; k=$(echo "$k" | tr -d '[:space:]')
+       case "$k" in
+         sk-ant-*) setvar ANTHROPIC_API_KEY "$k"; systemctl restart $SVC_NAME
+                   echo "✅ บันทึกแล้ว (${k:0:10}...${k: -4})" ;;
+         "") echo "ยกเลิก (ยังไม่ได้วางอะไร)" ;;
+         *) echo "❌ ไม่ใช่ API key: key ต้องขึ้นต้นด้วย sk-ant- (ที่วางมาขึ้นต้นด้วย ${k:0:7}) ไม่ได้บันทึก" ;;
+       esac ;;
     3) read -r -p "โหมด (paper/live): " m
        case "$m" in
          paper) ;;
