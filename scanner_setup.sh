@@ -54,6 +54,14 @@ fi
 systemctl enable -q stockscan
 command -v ufw >/dev/null && ufw allow in on tailscale0 to any port $PORT >/dev/null 2>&1
 
+# ทางลัด: พิมพ์แค่ webull = เปิดเมนู
+cat > /usr/local/bin/webull <<'SH'
+#!/usr/bin/env bash
+[ "$(id -u)" = 0 ] || exec sudo bash "$0" "$@"
+exec bash /root/webull_trading_company/manage.sh "$@"
+SH
+chmod 755 /usr/local/bin/webull
+
 [ "${1:-}" = quiet ] && exit 0
 systemctl restart stockscan
 IP=$(tailscale ip -4 2>/dev/null | head -1)
