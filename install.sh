@@ -46,11 +46,11 @@ if [ -f "$CRYPTO_ENV" ]; then  # ส่งแจ้งเตือนเข้�
   done
 fi
 
-say "5/7 ใส่ Webull API key (ขอที่ webull.co.th/en/open-api → Get API Key)"
+say "5/7 Webull API key (ไม่บังคับ — ยังไม่มีให้กด Enter ข้ามได้เลย ฝ่ายสแกนหุ้นไม่ต้องใช้)"
 if grep -q '^WEBULL_APP_KEY=' "$ENV"; then
   echo "มี key อยู่แล้ว (ใช้ของเดิม เปลี่ยนได้ที่ manage.sh ข้อ 1)"
 else
-  K=$(ask "App Key (เว้นว่าง = ใส่ทีหลังที่ manage.sh ข้อ 1): ")
+  K=$(ask "Webull App Key (ยังไม่มี = กด Enter ข้าม / ห้ามใส่ Gemini key ตรงนี้): ")
   if [ -n "$K" ]; then
     S=$(ask "App Secret: ")
     setvar WEBULL_APP_KEY "$K"; setvar WEBULL_APP_SECRET "$S"
